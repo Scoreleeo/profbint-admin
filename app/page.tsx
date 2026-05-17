@@ -5,6 +5,12 @@ type Outcome = "HOME" | "DRAW" | "AWAY";
 
 type RawPrediction = Record<string, unknown>;
 
+type LeagueOption = {
+  id: string;
+  name: string;
+  shortName: string;
+};
+
 type AdminPrediction = {
   id: string;
   league: string;
@@ -24,6 +30,16 @@ type AdminPrediction = {
 };
 
 const PROFBINT_PREDICTIONS_URL = "https://profbint.com/api/predictions";
+
+const LEAGUES: LeagueOption[] = [
+  { id: "39", name: "Premier League", shortName: "Premier League" },
+  { id: "140", name: "La Liga", shortName: "La Liga" },
+  { id: "135", name: "Serie A", shortName: "Serie A" },
+  { id: "78", name: "Bundesliga", shortName: "Bundesliga" },
+  { id: "61", name: "Ligue 1", shortName: "Ligue 1" },
+  { id: "2", name: "Champions League", shortName: "UCL" },
+  { id: "3", name: "Europa League", shortName: "UEL" },
+];
 
 function readString(value: unknown, fallback = "") {
   return typeof value === "string" && value.trim() ? value : fallback;
@@ -73,89 +89,125 @@ function getTopChoices(home: number, draw: number, away: number) {
   };
 }
 
+function formatKickoff(value: string) {
+  if (!value || value === "Kickoff TBC") return value;
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "Europe/London",
+  }).format(date);
+}
+
 function normalisePrediction(raw: RawPrediction, index: number): AdminPrediction {
+  const prediction = readObject(raw.prediction);
+  const probabilities = readObject(prediction.probabilities);
   const teams = readObject(raw.teams);
   const home = readObject(teams.home);
   const away = readObject(teams.away);
   const logos = readObject(raw.logos);
-  const percentages = readObject(raw.percentages);
   const fixture = readObject(raw.fixture);
 
   const homeTeam =
+    readString(raw.home) ||
     readString(raw.homeTeam) ||
     readString(raw.home_team) ||
-    readString(raw.home) ||
     readString(home.name) ||
     readString(fixture.homeTeam) ||
     "Home team";
 
   const awayTeam =
+    readString(raw.away) ||
     readString(raw.awayTeam) ||
     readString(raw.away_team) ||
-    readString(raw.away) ||
     readString(away.name) ||
     readString(fixture.awayTeam) ||
     "Away team";
 
   const homePercent =
-    readNumber(percentages.home) ||
-    readNumber(percentages.home_win) ||
+    readNumber(probabilities.home) ||
+    readNumber(readObject(raw.percentages).home) ||
+    readNumber(readObject(raw.percentages).home_win) ||
     readNumber(raw.homePercent) ||
     readNumber(raw.home_percentage);
 
   const drawPercent =
-    readNumber(percentages.draw) ||
+    readNumber(probabilities.draw) ||
+    readNumber(readObject(raw.percentages).draw) ||
     readNumber(raw.drawPercent) ||
     readNumber(raw.draw_percentage);
 
   const awayPercent =
-    readNumber(percentages.away) ||
-    readNumber(percentages.away_win) ||
+    readNumber(probabilities.away) ||
+    readNumber(readObject(raw.percentages).away) ||
+    readNumber(readObject(raw.percentages).away_win) ||
     readNumber(raw.awayPercent) ||
     readNumber(raw.away_percentage);
 
   const choices = getTopChoices(homePercent, drawPercent, awayPercent);
 
   return {
-    id: String(raw.id || raw.fixture_id || raw.fixtureId || index),
+    id: String(raw.fixtureId || raw.fixture_id || raw.id || index),
     league:
       readString(raw.league) ||
       readString(readObject(raw.leagueData).name) ||
       "Unknown league",
-    kickoff:
-      readString(raw.kickoff) ||
+    kickoff: formatKickoff(
       readString(raw.date) ||
-      readString(raw.time) ||
-      readString(fixture.date) ||
-      "Kickoff TBC",
+        readString(raw.kickoff) ||
+        readString(raw.time) ||
+        readString(fixture.date) ||
+        "Kickoff TBC"
+    ),
     homeTeam,
     awayTeam,
     homeLogo:
+      readString(raw.homeLogo) ||
       readString(home.logo) ||
-      readString(logos.home) ||
-      readString(raw.homeLogo),
+      readString(logos.home),
     awayLogo:
+      readString(raw.awayLogo) ||
       readString(away.logo) ||
-      readString(logos.away) ||
-      readString(raw.awayLogo),
+      readString(logos.away),
     homePercent,
     drawPercent,
     awayPercent,
     firstChoice: choices.firstChoice,
     secondChoice: choices.secondChoice,
-    confidence: readString(raw.confidence, "N/A"),
-    advice: readString(raw.advice, "No advice available yet."),
+    confidence:
+      readString(prediction.confidence) ||
+      readString(raw.confidence) ||
+      "N/A",
+    advice:
+      readString(prediction.advice) ||
+      readString(prediction.summary) ||
+      readString(prediction.reason) ||
+      readString(raw.advice) ||
+      "No advice available yet.",
     bestBet:
+      readString(prediction.best_bet) ||
+      readString(prediction.bestBet) ||
+      readString(prediction.winner) ||
       readString(raw.best_bet) ||
       readString(raw.bestBet) ||
       readString(raw.winner) ||
-      "No backend pick available.",
+      `${getOutcomeLabel(choices.firstChoice)} is the current top model pick.`,
   };
 }
 
-async function getPredictions() {
+async function getPredictions(leagueId: string) {
   try {
-    const response = await fetch(PROFBINT_PREDICTIONS_URL, {
+    const url = `${PROFBINT_PREDICTIONS_URL}?league=${encodeURIComponent(
+      leagueId
+    )}`;
+
+    const response = await fetch(url, {
       cache: "no-store",
     });
 
@@ -167,15 +219,14 @@ async function getPredictions() {
     }
 
     const data = await response.json();
-
     const payload = readObject(data);
 
     const rawPredictions: RawPrediction[] = Array.isArray(data)
       ? data
-      : Array.isArray(payload.predictions)
-        ? (payload.predictions as RawPrediction[])
-        : Array.isArray(payload.matches)
-          ? (payload.matches as RawPrediction[])
+      : Array.isArray(payload.matches)
+        ? (payload.matches as RawPrediction[])
+        : Array.isArray(payload.predictions)
+          ? (payload.predictions as RawPrediction[])
           : Array.isArray(payload.fixtures)
             ? (payload.fixtures as RawPrediction[])
             : [];
@@ -231,12 +282,15 @@ async function logout() {
 export default async function Home({
   searchParams,
 }: {
-  searchParams?: Promise<{ error?: string }>;
+  searchParams?: Promise<{ error?: string; league?: string }>;
 }) {
   const cookieStore = await cookies();
   const params = await searchParams;
 
   const isLoggedIn = cookieStore.get("profbint_admin")?.value === "true";
+  const selectedLeagueId = params?.league || "39";
+  const selectedLeague =
+    LEAGUES.find((league) => league.id === selectedLeagueId) || LEAGUES[0];
 
   if (!isLoggedIn) {
     return (
@@ -287,17 +341,29 @@ export default async function Home({
     );
   }
 
-  const { predictions, error } = await getPredictions();
-
-  const leagues = Array.from(
-    new Set(predictions.map((prediction) => prediction.league))
-  );
+  const { predictions, error } = await getPredictions(selectedLeague.id);
 
   const strongestPick = [...predictions].sort((a, b) => {
     const aMax = Math.max(a.homePercent, a.drawPercent, a.awayPercent);
     const bMax = Math.max(b.homePercent, b.drawPercent, b.awayPercent);
     return bMax - aMax;
   })[0];
+
+  const averageTopPick =
+    predictions.length > 0
+      ? Math.round(
+          predictions.reduce((total, prediction) => {
+            return (
+              total +
+              Math.max(
+                prediction.homePercent,
+                prediction.drawPercent,
+                prediction.awayPercent
+              )
+            );
+          }, 0) / predictions.length
+        )
+      : 0;
 
   return (
     <main className="min-h-screen bg-slate-950 text-white">
@@ -315,8 +381,8 @@ export default async function Home({
 
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
                 Internal unlocked prediction view powered only by the Pro
-                Football Intel prediction API. Home win, draw, and away win
-                intelligence only.
+                Football Intel prediction API. Select a league to inspect its
+                home win, draw, and away win intelligence.
               </p>
             </div>
 
@@ -337,17 +403,50 @@ export default async function Home({
           </div>
         </header>
 
+        <nav className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-3 shadow-xl">
+          <p className="px-3 pb-3 text-xs font-black uppercase tracking-[0.25em] text-slate-500">
+            League selector
+          </p>
+
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-7">
+            {LEAGUES.map((league) => {
+              const isActive = league.id === selectedLeague.id;
+
+              return (
+                <a
+                  key={league.id}
+                  href={`/?league=${league.id}`}
+                  className={`rounded-2xl border px-4 py-3 text-sm font-black transition ${
+                    isActive
+                      ? "border-amber-400 bg-amber-400 text-slate-950"
+                      : "border-slate-800 bg-slate-950 text-slate-300 hover:border-amber-400 hover:text-amber-300"
+                  }`}
+                >
+                  <span className="block">{league.shortName}</span>
+                  <span
+                    className={`mt-1 block text-xs ${
+                      isActive ? "text-slate-800" : "text-slate-500"
+                    }`}
+                  >
+                    ID {league.id}
+                  </span>
+                </a>
+              );
+            })}
+          </div>
+        </nav>
+
         <div className="mt-6 grid gap-4 md:grid-cols-4">
+          <StatCard
+            title="Selected league"
+            value={selectedLeague.shortName}
+            detail={`league ID ${selectedLeague.id}`}
+          />
+
           <StatCard
             title="Live matches"
             value={String(predictions.length)}
             detail="from Pro Football Intel"
-          />
-
-          <StatCard
-            title="Leagues"
-            value={String(leagues.length)}
-            detail="covered today"
           />
 
           <StatCard
@@ -365,9 +464,9 @@ export default async function Home({
           />
 
           <StatCard
-            title="Prediction mode"
-            value="1X2"
-            detail="home / draw / away"
+            title="Avg top pick"
+            value={`${averageTopPick}%`}
+            detail="model signal"
           />
         </div>
 
@@ -380,7 +479,10 @@ export default async function Home({
 
         <div className="mt-8 flex flex-col gap-3 border-b border-slate-800 pb-5 md:flex-row md:items-end md:justify-between">
           <div>
-            <h2 className="text-2xl font-black">Today&apos;s prediction board</h2>
+            <h2 className="text-2xl font-black">
+              {selectedLeague.name} prediction board
+            </h2>
+
             <p className="mt-1 text-sm text-slate-400">
               First and second choice are calculated from the 1X2 percentages
               returned by the Pro Football Intel API.
@@ -395,7 +497,7 @@ export default async function Home({
         <div className="mt-6 grid gap-5">
           {predictions.length === 0 && !error ? (
             <div className="rounded-3xl border border-slate-800 bg-slate-900 p-6 text-slate-300">
-              No predictions returned from the Pro Football Intel API yet.
+              No predictions returned for {selectedLeague.name} yet.
             </div>
           ) : null}
 
