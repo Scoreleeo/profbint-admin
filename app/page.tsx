@@ -3,36 +3,7 @@ import { redirect } from "next/navigation";
 
 type Outcome = "HOME" | "DRAW" | "AWAY";
 
-type BackendPrediction = {
-  id?: string | number;
-  fixture_id?: string | number;
-  league?: string;
-  kickoff?: string;
-  date?: string;
-  homeTeam?: string;
-  awayTeam?: string;
-  home_team?: string;
-  away_team?: string;
-  teams?: {
-    home?: { name?: string; logo?: string };
-    away?: { name?: string; logo?: string };
-  };
-  logos?: {
-    home?: string;
-    away?: string;
-  };
-  percentages?: {
-    home?: number;
-    draw?: number;
-    away?: number;
-    home_win?: number;
-    away_win?: number;
-  };
-  confidence?: number | string;
-  advice?: string;
-  winner?: string;
-  best_bet?: string;
-};
+type RawPrediction = Record<string, unknown>;
 
 type AdminPrediction = {
   id: string;
@@ -53,6 +24,29 @@ type AdminPrediction = {
 };
 
 const PROFBINT_PREDICTIONS_URL = "https://profbint.com/api/predictions";
+
+function readString(value: unknown, fallback = "") {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function readNumber(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.round(value);
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value.replace("%", "").trim());
+    return Number.isFinite(parsed) ? Math.round(parsed) : 0;
+  }
+
+  return 0;
+}
+
+function readObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
 
 function getOutcomeLabel(outcome: Outcome) {
   if (outcome === "HOME") return "Home win";
@@ -79,60 +73,83 @@ function getTopChoices(home: number, draw: number, away: number) {
   };
 }
 
-function normalisePercent(value: unknown) {
-  if (typeof value === "number") return Math.round(value);
-  if (typeof value === "string") {
-    const parsed = Number(value.replace("%", ""));
-    return Number.isFinite(parsed) ? Math.round(parsed) : 0;
-  }
-  return 0;
-}
+function normalisePrediction(raw: RawPrediction, index: number): AdminPrediction {
+  const teams = readObject(raw.teams);
+  const home = readObject(teams.home);
+  const away = readObject(teams.away);
+  const logos = readObject(raw.logos);
+  const percentages = readObject(raw.percentages);
+  const fixture = readObject(raw.fixture);
 
-function normalisePrediction(
-  prediction: BackendPrediction,
-  index: number
-): AdminPrediction {
   const homeTeam =
-    prediction.homeTeam ||
-    prediction.home_team ||
-    prediction.teams?.home?.name ||
+    readString(raw.homeTeam) ||
+    readString(raw.home_team) ||
+    readString(raw.home) ||
+    readString(home.name) ||
+    readString(fixture.homeTeam) ||
     "Home team";
 
   const awayTeam =
-    prediction.awayTeam ||
-    prediction.away_team ||
-    prediction.teams?.away?.name ||
+    readString(raw.awayTeam) ||
+    readString(raw.away_team) ||
+    readString(raw.away) ||
+    readString(away.name) ||
+    readString(fixture.awayTeam) ||
     "Away team";
 
-  const homePercent = normalisePercent(
-    prediction.percentages?.home ?? prediction.percentages?.home_win
-  );
+  const homePercent =
+    readNumber(percentages.home) ||
+    readNumber(percentages.home_win) ||
+    readNumber(raw.homePercent) ||
+    readNumber(raw.home_percentage);
 
-  const drawPercent = normalisePercent(prediction.percentages?.draw);
+  const drawPercent =
+    readNumber(percentages.draw) ||
+    readNumber(raw.drawPercent) ||
+    readNumber(raw.draw_percentage);
 
-  const awayPercent = normalisePercent(
-    prediction.percentages?.away ?? prediction.percentages?.away_win
-  );
+  const awayPercent =
+    readNumber(percentages.away) ||
+    readNumber(percentages.away_win) ||
+    readNumber(raw.awayPercent) ||
+    readNumber(raw.away_percentage);
 
   const choices = getTopChoices(homePercent, drawPercent, awayPercent);
 
   return {
-    id: String(prediction.id || prediction.fixture_id || index),
-    league: prediction.league || "Unknown league",
-    kickoff: prediction.kickoff || prediction.date || "Kickoff TBC",
+    id: String(raw.id || raw.fixture_id || raw.fixtureId || index),
+    league:
+      readString(raw.league) ||
+      readString(readObject(raw.leagueData).name) ||
+      "Unknown league",
+    kickoff:
+      readString(raw.kickoff) ||
+      readString(raw.date) ||
+      readString(raw.time) ||
+      readString(fixture.date) ||
+      "Kickoff TBC",
     homeTeam,
     awayTeam,
-    homeLogo: prediction.teams?.home?.logo || prediction.logos?.home,
-    awayLogo: prediction.teams?.away?.logo || prediction.logos?.away,
+    homeLogo:
+      readString(home.logo) ||
+      readString(logos.home) ||
+      readString(raw.homeLogo),
+    awayLogo:
+      readString(away.logo) ||
+      readString(logos.away) ||
+      readString(raw.awayLogo),
     homePercent,
     drawPercent,
     awayPercent,
     firstChoice: choices.firstChoice,
     secondChoice: choices.secondChoice,
-    confidence: String(prediction.confidence || "N/A"),
-    advice: prediction.advice || "No advice available yet.",
+    confidence: readString(raw.confidence, "N/A"),
+    advice: readString(raw.advice, "No advice available yet."),
     bestBet:
-      prediction.best_bet || prediction.winner || "No backend pick available.",
+      readString(raw.best_bet) ||
+      readString(raw.bestBet) ||
+      readString(raw.winner) ||
+      "No backend pick available.",
   };
 }
 
@@ -151,13 +168,17 @@ async function getPredictions() {
 
     const data = await response.json();
 
-    const rawPredictions: BackendPrediction[] = Array.isArray(data)
+    const payload = readObject(data);
+
+    const rawPredictions: RawPrediction[] = Array.isArray(data)
       ? data
-      : Array.isArray(data.predictions)
-        ? data.predictions
-        : Array.isArray(data.matches)
-          ? data.matches
-          : [];
+      : Array.isArray(payload.predictions)
+        ? (payload.predictions as RawPrediction[])
+        : Array.isArray(payload.matches)
+          ? (payload.matches as RawPrediction[])
+          : Array.isArray(payload.fixtures)
+            ? (payload.fixtures as RawPrediction[])
+            : [];
 
     return {
       predictions: rawPredictions.map(normalisePrediction),
@@ -222,7 +243,7 @@ export default async function Home({
       <main className="min-h-screen bg-slate-950 px-4 py-10 text-white">
         <section className="mx-auto flex min-h-[80vh] max-w-md items-center">
           <div className="w-full rounded-3xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
-            <p className="text-sm font-bold uppercase tracking-[0.3em] text-emerald-400">
+            <p className="text-sm font-black uppercase tracking-[0.3em] text-amber-400">
               Pro Football Intel
             </p>
 
@@ -238,7 +259,7 @@ export default async function Home({
                 name="password"
                 type="password"
                 placeholder="Admin password"
-                className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-white outline-none focus:border-emerald-400"
+                className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-white outline-none focus:border-amber-400"
               />
 
               {params?.error === "wrong-password" ? (
@@ -249,13 +270,13 @@ export default async function Home({
 
               {params?.error === "missing-password" ? (
                 <p className="text-sm font-semibold text-red-400">
-                  ADMIN_PASSWORD is missing.
+                  ADMIN_PASSWORD is missing in Vercel.
                 </p>
               ) : null}
 
               <button
                 type="submit"
-                className="w-full rounded-2xl bg-emerald-400 px-4 py-3 font-black text-slate-950 hover:bg-emerald-300"
+                className="w-full rounded-2xl bg-amber-400 px-4 py-3 font-black text-slate-950 hover:bg-amber-300"
               >
                 Unlock admin
               </button>
@@ -272,44 +293,47 @@ export default async function Home({
     new Set(predictions.map((prediction) => prediction.league))
   );
 
-  const averageConfidence =
-    predictions.length > 0
-      ? Math.round(
-          predictions.reduce((total, prediction) => {
-            const value = Number(String(prediction.confidence).replace("%", ""));
-            return total + (Number.isFinite(value) ? value : 0);
-          }, 0) / predictions.length
-        )
-      : 0;
+  const strongestPick = [...predictions].sort((a, b) => {
+    const aMax = Math.max(a.homePercent, a.drawPercent, a.awayPercent);
+    const bMax = Math.max(b.homePercent, b.drawPercent, b.awayPercent);
+    return bMax - aMax;
+  })[0];
 
   return (
     <main className="min-h-screen bg-slate-950 text-white">
       <section className="mx-auto max-w-7xl px-4 py-8">
-        <header className="rounded-[2rem] border border-slate-800 bg-gradient-to-br from-slate-900 to-slate-950 p-6 shadow-2xl">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+        <header className="rounded-[2rem] border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 p-6 shadow-2xl">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <p className="text-sm font-black uppercase tracking-[0.35em] text-emerald-400">
+              <p className="text-sm font-black uppercase tracking-[0.35em] text-amber-400">
                 Pro Football Intel Admin
               </p>
 
               <h1 className="mt-4 text-3xl font-black tracking-tight md:text-5xl">
-                Live unlocked predictions
+                Control dashboard
               </h1>
 
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
-                Internal admin view powered only by the Pro Football Intel
-                prediction API. Home win, draw, and away win intelligence.
+                Internal unlocked prediction view powered only by the Pro
+                Football Intel prediction API. Home win, draw, and away win
+                intelligence only.
               </p>
             </div>
 
-            <form action={logout}>
-              <button
-                type="submit"
-                className="rounded-2xl border border-slate-700 px-5 py-3 text-sm font-bold text-slate-200 hover:border-emerald-400 hover:text-emerald-300"
-              >
-                Lock dashboard
-              </button>
-            </form>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-5 py-3 text-sm font-bold text-emerald-300">
+                API {error ? "issue" : "online"}
+              </div>
+
+              <form action={logout}>
+                <button
+                  type="submit"
+                  className="rounded-2xl border border-slate-700 px-5 py-3 text-sm font-bold text-slate-200 hover:border-amber-400 hover:text-amber-300"
+                >
+                  Lock dashboard
+                </button>
+              </form>
+            </div>
           </div>
         </header>
 
@@ -321,21 +345,29 @@ export default async function Home({
           />
 
           <StatCard
-            title="API status"
-            value={error ? "Issue" : "Online"}
-            detail="internal prediction route"
-          />
-
-          <StatCard
             title="Leagues"
             value={String(leagues.length)}
             detail="covered today"
           />
 
           <StatCard
-            title="Avg confidence"
-            value={`${averageConfidence}%`}
-            detail="visible admin signal"
+            title="Strongest pick"
+            value={
+              strongestPick
+                ? `${Math.max(
+                    strongestPick.homePercent,
+                    strongestPick.drawPercent,
+                    strongestPick.awayPercent
+                  )}%`
+                : "0%"
+            }
+            detail={strongestPick ? strongestPick.league : "waiting for data"}
+          />
+
+          <StatCard
+            title="Prediction mode"
+            value="1X2"
+            detail="home / draw / away"
           />
         </div>
 
@@ -350,13 +382,13 @@ export default async function Home({
           <div>
             <h2 className="text-2xl font-black">Today&apos;s prediction board</h2>
             <p className="mt-1 text-sm text-slate-400">
-              First choice and second choice are calculated from the 1X2
-              percentages returned by the Pro Football Intel API.
+              First and second choice are calculated from the 1X2 percentages
+              returned by the Pro Football Intel API.
             </p>
           </div>
 
-          <div className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm font-bold text-emerald-300">
-            1X2 mode only
+          <div className="rounded-full border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-bold text-amber-300">
+            Private admin view
           </div>
         </div>
 
@@ -372,10 +404,10 @@ export default async function Home({
               key={prediction.id}
               className="overflow-hidden rounded-[2rem] border border-slate-800 bg-slate-900 shadow-xl"
             >
-              <div className="grid gap-0 lg:grid-cols-[1.3fr_1fr]">
+              <div className="grid gap-0 lg:grid-cols-[1.4fr_1fr]">
                 <div className="p-5 md:p-6">
                   <div className="flex flex-wrap items-center gap-3">
-                    <span className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-black uppercase tracking-[0.18em] text-emerald-300">
+                    <span className="rounded-full bg-amber-500/10 px-3 py-1 text-xs font-black uppercase tracking-[0.18em] text-amber-300">
                       {prediction.league}
                     </span>
 
@@ -384,24 +416,22 @@ export default async function Home({
                     </span>
                   </div>
 
-                  <div className="mt-6 flex items-center gap-4">
-                    <TeamLogo src={prediction.homeLogo} name={prediction.homeTeam} />
+                  <div className="mt-6 grid gap-4 sm:grid-cols-[1fr_auto_1fr] sm:items-center">
+                    <TeamBlock
+                      name={prediction.homeTeam}
+                      logo={prediction.homeLogo}
+                      align="left"
+                    />
 
-                    <div className="min-w-0">
-                      <h3 className="text-2xl font-black md:text-3xl">
-                        {prediction.homeTeam}
-                      </h3>
-
-                      <p className="my-1 text-xs font-bold uppercase tracking-[0.25em] text-slate-500">
-                        vs
-                      </p>
-
-                      <h3 className="text-2xl font-black md:text-3xl">
-                        {prediction.awayTeam}
-                      </h3>
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-slate-700 bg-slate-950 text-sm font-black text-slate-400">
+                      VS
                     </div>
 
-                    <TeamLogo src={prediction.awayLogo} name={prediction.awayTeam} />
+                    <TeamBlock
+                      name={prediction.awayTeam}
+                      logo={prediction.awayLogo}
+                      align="right"
+                    />
                   </div>
 
                   <div className="mt-6 grid gap-3 sm:grid-cols-3">
@@ -410,11 +440,13 @@ export default async function Home({
                       value={prediction.homePercent}
                       active={prediction.firstChoice === "HOME"}
                     />
+
                     <PercentBox
                       label="Draw"
                       value={prediction.drawPercent}
                       active={prediction.firstChoice === "DRAW"}
                     />
+
                     <PercentBox
                       label="Away win"
                       value={prediction.awayPercent}
@@ -451,7 +483,7 @@ export default async function Home({
 
                   <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950 p-4">
                     <p className="text-xs font-black uppercase tracking-[0.22em] text-slate-500">
-                      Admin note
+                      Admin insight
                     </p>
 
                     <p className="mt-2 font-black text-white">
@@ -503,14 +535,14 @@ function PercentBox({
     <div
       className={`rounded-2xl border p-4 ${
         active
-          ? "border-emerald-400 bg-emerald-500/10"
+          ? "border-amber-400 bg-amber-500/10"
           : "border-slate-800 bg-slate-950"
       }`}
     >
       <p className="text-sm font-bold text-slate-400">{label}</p>
       <p className="mt-2 text-3xl font-black text-white">{value}%</p>
       {active ? (
-        <p className="mt-1 text-xs font-black uppercase tracking-[0.16em] text-emerald-300">
+        <p className="mt-1 text-xs font-black uppercase tracking-[0.16em] text-amber-300">
           top pick
         </p>
       ) : null}
@@ -533,7 +565,7 @@ function ChoiceBox({
     <div
       className={`rounded-2xl border p-4 ${
         primary
-          ? "border-emerald-400 bg-emerald-500/10"
+          ? "border-amber-400 bg-amber-500/10"
           : "border-slate-700 bg-slate-900"
       }`}
     >
@@ -541,7 +573,7 @@ function ChoiceBox({
         <div>
           <p
             className={`text-xs font-black uppercase tracking-[0.22em] ${
-              primary ? "text-emerald-300" : "text-slate-500"
+              primary ? "text-amber-300" : "text-slate-500"
             }`}
           >
             {title}
@@ -553,7 +585,7 @@ function ChoiceBox({
         <span
           className={`flex h-12 w-12 items-center justify-center rounded-2xl text-xl font-black ${
             primary
-              ? "bg-emerald-400 text-slate-950"
+              ? "bg-amber-400 text-slate-950"
               : "bg-slate-800 text-white"
           }`}
         >
@@ -564,14 +596,34 @@ function ChoiceBox({
   );
 }
 
-function TeamLogo({ src, name }: { src?: string; name: string }) {
-  if (!src) return null;
-
+function TeamBlock({
+  name,
+  logo,
+  align,
+}: {
+  name: string;
+  logo?: string;
+  align: "left" | "right";
+}) {
   return (
-    <img
-      src={src}
-      alt={`${name} logo`}
-      className="h-12 w-12 shrink-0 rounded-full bg-white object-contain p-1"
-    />
+    <div
+      className={`flex items-center gap-3 ${
+        align === "right" ? "sm:flex-row-reverse sm:text-right" : ""
+      }`}
+    >
+      {logo ? (
+        <img
+          src={logo}
+          alt={`${name} logo`}
+          className="h-12 w-12 shrink-0 rounded-full bg-white object-contain p-1"
+        />
+      ) : (
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-slate-800 text-sm font-black text-slate-400">
+          FC
+        </div>
+      )}
+
+      <h3 className="text-xl font-black md:text-2xl">{name}</h3>
+    </div>
   );
 }
