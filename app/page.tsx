@@ -37,8 +37,8 @@ const LEAGUES: LeagueOption[] = [
   { id: "135", name: "Serie A", shortName: "Serie A" },
   { id: "78", name: "Bundesliga", shortName: "Bundesliga" },
   { id: "61", name: "Ligue 1", shortName: "Ligue 1" },
-  { id: "2", name: "Champions League", shortName: "UCL" },
-  { id: "3", name: "Europa League", shortName: "UEL" },
+  { id: "88", name: "Eredivisie", shortName: "Eredivisie" },
+  { id: "94", name: "Primeira Liga", shortName: "Primeira Liga" },
 ];
 
 function readString(value: unknown, fallback = "") {
