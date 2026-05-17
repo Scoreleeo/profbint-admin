@@ -1,0 +1,33 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model PredictionHistory {
+  id               Int      @id @default(autoincrement())
+
+  fixtureId        Int?
+  leagueId         Int?
+  leagueName       String?
+
+  homeTeam         String
+  awayTeam         String
+
+  kickoff          DateTime?
+
+  firstChoice      String?
+  secondChoice     String?
+
+  homeWinPercent   Float?
+  drawPercent      Float?
+  awayWinPercent   Float?
+
+  strongestPick    String?
+  strongestPercent Float?
+
+  createdAt        DateTime @default(now())
+}

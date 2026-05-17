@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { prisma } from "@/lib/prisma";
 
 type Outcome = "HOME" | "DRAW" | "AWAY";
 
@@ -13,8 +14,11 @@ type LeagueOption = {
 
 type AdminPrediction = {
   id: string;
+  fixtureId?: number;
+  leagueId: number;
   league: string;
   kickoff: string;
+  kickoffIso?: string;
   homeTeam: string;
   awayTeam: string;
   homeLogo?: string;
@@ -105,7 +109,23 @@ function formatKickoff(value: string) {
   }).format(date);
 }
 
-function normalisePrediction(raw: RawPrediction, index: number): AdminPrediction {
+function parseKickoffDate(value?: string) {
+  if (!value) return null;
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date;
+}
+
+function normalisePrediction(
+  raw: RawPrediction,
+  index: number,
+  leagueId: number
+): AdminPrediction {
   const prediction = readObject(raw.prediction);
   const probabilities = readObject(prediction.probabilities);
   const teams = readObject(raw.teams);
@@ -113,6 +133,12 @@ function normalisePrediction(raw: RawPrediction, index: number): AdminPrediction
   const away = readObject(teams.away);
   const logos = readObject(raw.logos);
   const fixture = readObject(raw.fixture);
+
+  const kickoffIso =
+    readString(raw.date) ||
+    readString(raw.kickoff) ||
+    readString(raw.time) ||
+    readString(fixture.date);
 
   const homeTeam =
     readString(raw.home) ||
@@ -152,19 +178,21 @@ function normalisePrediction(raw: RawPrediction, index: number): AdminPrediction
 
   const choices = getTopChoices(homePercent, drawPercent, awayPercent);
 
+  const rawFixtureId =
+    readNumber(raw.fixtureId) ||
+    readNumber(raw.fixture_id) ||
+    readNumber(raw.id);
+
   return {
     id: String(raw.fixtureId || raw.fixture_id || raw.id || index),
+    fixtureId: rawFixtureId || undefined,
+    leagueId,
     league:
       readString(raw.league) ||
       readString(readObject(raw.leagueData).name) ||
       "Unknown league",
-    kickoff: formatKickoff(
-      readString(raw.date) ||
-        readString(raw.kickoff) ||
-        readString(raw.time) ||
-        readString(fixture.date) ||
-        "Kickoff TBC"
-    ),
+    kickoff: formatKickoff(kickoffIso || "Kickoff TBC"),
+    kickoffIso: kickoffIso || undefined,
     homeTeam,
     awayTeam,
     homeLogo:
@@ -232,7 +260,9 @@ async function getPredictions(leagueId: string) {
             : [];
 
     return {
-      predictions: rawPredictions.map(normalisePrediction),
+      predictions: rawPredictions.map((prediction, index) =>
+        normalisePrediction(prediction, index, Number(leagueId))
+      ),
       error: "",
     };
   } catch {
@@ -279,10 +309,75 @@ async function logout() {
   redirect("/");
 }
 
+async function saveLeagueSnapshot(formData: FormData) {
+  "use server";
+
+  const cookieStore = await cookies();
+  const isLoggedIn = cookieStore.get("profbint_admin")?.value === "true";
+
+  if (!isLoggedIn) {
+    redirect("/");
+  }
+
+  const leagueId = String(formData.get("leagueId") || "39");
+  const selectedLeague =
+    LEAGUES.find((league) => league.id === leagueId) || LEAGUES[0];
+
+  const { predictions } = await getPredictions(selectedLeague.id);
+
+  for (const prediction of predictions) {
+    const strongestPercent = Math.max(
+      prediction.homePercent,
+      prediction.drawPercent,
+      prediction.awayPercent
+    );
+
+    const existing = prediction.fixtureId
+      ? await prisma.predictionHistory.findFirst({
+          where: {
+            fixtureId: prediction.fixtureId,
+            leagueId: prediction.leagueId,
+          },
+        })
+      : null;
+
+    const data = {
+      fixtureId: prediction.fixtureId || null,
+      leagueId: prediction.leagueId,
+      leagueName: prediction.league,
+      homeTeam: prediction.homeTeam,
+      awayTeam: prediction.awayTeam,
+      kickoff: parseKickoffDate(prediction.kickoffIso),
+      firstChoice: prediction.firstChoice,
+      secondChoice: prediction.secondChoice,
+      homeWinPercent: prediction.homePercent,
+      drawPercent: prediction.drawPercent,
+      awayWinPercent: prediction.awayPercent,
+      strongestPick: prediction.firstChoice,
+      strongestPercent,
+    };
+
+    if (existing) {
+      await prisma.predictionHistory.update({
+        where: {
+          id: existing.id,
+        },
+        data,
+      });
+    } else {
+      await prisma.predictionHistory.create({
+        data,
+      });
+    }
+  }
+
+  redirect(`/?league=${selectedLeague.id}&saved=true`);
+}
+
 export default async function Home({
   searchParams,
 }: {
-  searchParams?: Promise<{ error?: string; league?: string }>;
+  searchParams?: Promise<{ error?: string; league?: string; saved?: string }>;
 }) {
   const cookieStore = await cookies();
   const params = await searchParams;
@@ -468,6 +563,42 @@ export default async function Home({
             value={`${averageTopPick}%`}
             detail="model signal"
           />
+        </div>
+
+        <div className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-5 shadow-xl">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
+                Prediction history
+              </p>
+
+              <h2 className="mt-2 text-2xl font-black">
+                Save {selectedLeague.name} snapshot
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-400">
+                Stores the current league predictions in the admin database for
+                future result tracking and accuracy analytics.
+              </p>
+            </div>
+
+            <form action={saveLeagueSnapshot}>
+              <input type="hidden" name="leagueId" value={selectedLeague.id} />
+
+              <button
+                type="submit"
+                className="rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-slate-950 hover:bg-amber-300"
+              >
+                Save current league
+              </button>
+            </form>
+          </div>
+
+          {params?.saved === "true" ? (
+            <div className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-bold text-emerald-300">
+              Snapshot saved successfully for {selectedLeague.name}.
+            </div>
+          ) : null}
         </div>
 
         {error ? (
