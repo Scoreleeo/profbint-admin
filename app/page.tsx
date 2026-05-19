@@ -35,6 +35,29 @@ type AdminPrediction = {
   bestBet: string;
 };
 
+type SavedPrediction = {
+  id: number;
+  fixtureId: number | null;
+  leagueId: number | null;
+  leagueName: string | null;
+  homeTeam: string;
+  awayTeam: string;
+  kickoff: Date | null;
+  firstChoice: string | null;
+  secondChoice: string | null;
+  homeWinPercent: number | null;
+  drawPercent: number | null;
+  awayWinPercent: number | null;
+  strongestPick: string | null;
+  strongestPercent: number | null;
+  actualResult: string | null;
+  firstChoiceResult: string | null;
+  secondChoiceResult: string | null;
+  status: string;
+  savedAt: Date;
+  updatedAt: Date;
+};
+
 const PROFBINT_PREDICTIONS_URL = "https://profbint.com/api/predictions";
 
 const LEAGUES: LeagueOption[] = [
@@ -123,6 +146,21 @@ function parseKickoffDate(value?: string) {
   }
 
   return date;
+}
+
+function getAccuracy(won: number, total: number) {
+  if (total === 0) return "0%";
+  return `${Math.round((won / total) * 100)}%`;
+}
+
+function getTodayRange() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+
+  return { start, end };
 }
 
 function normalisePrediction(
@@ -388,10 +426,90 @@ async function saveLeagueSnapshot(formData: FormData) {
   redirect(`/?league=${selectedLeague.id}&saved=true`);
 }
 
+async function updateResult(formData: FormData) {
+  "use server";
+
+  const cookieStore = await cookies();
+  const isLoggedIn = cookieStore.get("profbint_admin")?.value === "true";
+
+  if (!isLoggedIn) {
+    redirect("/");
+  }
+
+  const id = Number(formData.get("id"));
+  const leagueId = String(formData.get("leagueId") || "39");
+  const actualResult = String(formData.get("actualResult") || "");
+
+  if (!id || !["HOME", "DRAW", "AWAY"].includes(actualResult)) {
+    redirect(`/?league=${leagueId}`);
+  }
+
+  const prediction = await prisma.predictionHistory.findUnique({
+    where: { id },
+  });
+
+  if (!prediction) {
+    redirect(`/?league=${leagueId}`);
+  }
+
+  const firstChoiceResult =
+    prediction.firstChoice === actualResult ? "WON" : "LOST";
+
+  const secondChoiceResult =
+    prediction.secondChoice === actualResult ? "WON" : "LOST";
+
+  await prisma.predictionHistory.update({
+    where: { id },
+    data: {
+      actualResult,
+      firstChoiceResult,
+      secondChoiceResult,
+      status: "RESULTED",
+    },
+  });
+
+  redirect(`/?league=${leagueId}&result=updated`);
+}
+
+async function resetResult(formData: FormData) {
+  "use server";
+
+  const cookieStore = await cookies();
+  const isLoggedIn = cookieStore.get("profbint_admin")?.value === "true";
+
+  if (!isLoggedIn) {
+    redirect("/");
+  }
+
+  const id = Number(formData.get("id"));
+  const leagueId = String(formData.get("leagueId") || "39");
+
+  if (!id) {
+    redirect(`/?league=${leagueId}`);
+  }
+
+  await prisma.predictionHistory.update({
+    where: { id },
+    data: {
+      actualResult: null,
+      firstChoiceResult: null,
+      secondChoiceResult: null,
+      status: "PENDING",
+    },
+  });
+
+  redirect(`/?league=${leagueId}&result=reset`);
+}
+
 export default async function Home({
   searchParams,
 }: {
-  searchParams?: Promise<{ error?: string; league?: string; saved?: string }>;
+  searchParams?: Promise<{
+    error?: string;
+    league?: string;
+    saved?: string;
+    result?: string;
+  }>;
 }) {
   const cookieStore = await cookies();
   const params = await searchParams;
@@ -459,30 +577,63 @@ export default async function Home({
     orderBy: {
       savedAt: "desc",
     },
-    take: 8,
+    take: 12,
   });
+
+  const allCompleted = await prisma.predictionHistory.findMany({
+    where: {
+      status: "RESULTED",
+    },
+  });
+
+  const selectedLeagueCompleted = allCompleted.filter(
+    (prediction) => prediction.leagueId === Number(selectedLeague.id)
+  );
+
+  const premierLeagueCompleted = allCompleted.filter(
+    (prediction) => prediction.leagueId === 39
+  );
+
+  const strongestCompleted = allCompleted.filter(
+    (prediction) => prediction.strongestPick && prediction.actualResult
+  );
+
+  const todayRange = getTodayRange();
+
+  const todayCompleted = allCompleted.filter((prediction) => {
+    const updated = new Date(prediction.updatedAt);
+    return updated >= todayRange.start && updated <= todayRange.end;
+  });
+
+  const overallWins = allCompleted.filter(
+    (prediction) => prediction.firstChoiceResult === "WON"
+  ).length;
+
+  const selectedLeagueWins = selectedLeagueCompleted.filter(
+    (prediction) => prediction.firstChoiceResult === "WON"
+  ).length;
+
+  const premierLeagueWins = premierLeagueCompleted.filter(
+    (prediction) => prediction.firstChoiceResult === "WON"
+  ).length;
+
+  const strongestWins = strongestCompleted.filter(
+    (prediction) => prediction.strongestPick === prediction.actualResult
+  ).length;
+
+  const todayWins = todayCompleted.filter(
+    (prediction) => prediction.firstChoiceResult === "WON"
+  ).length;
+
+  const todayLosses = todayCompleted.filter(
+    (prediction) => prediction.firstChoiceResult === "LOST"
+  ).length;
 
   const strongestPick = [...predictions].sort((a, b) => {
     const aMax = Math.max(a.homePercent, a.drawPercent, a.awayPercent);
     const bMax = Math.max(b.homePercent, b.drawPercent, b.awayPercent);
     return bMax - aMax;
   })[0];
-
-  const averageTopPick =
-    predictions.length > 0
-      ? Math.round(
-          predictions.reduce((total, prediction) => {
-            return (
-              total +
-              Math.max(
-                prediction.homePercent,
-                prediction.drawPercent,
-                prediction.awayPercent
-              )
-            );
-          }, 0) / predictions.length
-        )
-      : 0;
 
   return (
     <main className="min-h-screen bg-slate-950 text-white">
@@ -557,9 +708,35 @@ export default async function Home({
 
         <div className="mt-6 grid gap-4 md:grid-cols-4">
           <StatCard
-            title="Selected league"
-            value={selectedLeague.shortName}
-            detail={`league ID ${selectedLeague.id}`}
+            title={`${selectedLeague.shortName} accuracy`}
+            value={getAccuracy(selectedLeagueWins, selectedLeagueCompleted.length)}
+            detail={`${selectedLeagueWins}/${selectedLeagueCompleted.length} first-choice wins`}
+          />
+
+          <StatCard
+            title="Overall accuracy"
+            value={getAccuracy(overallWins, allCompleted.length)}
+            detail={`${overallWins}/${allCompleted.length} first-choice wins`}
+          />
+
+          <StatCard
+            title="Strongest pick accuracy"
+            value={getAccuracy(strongestWins, strongestCompleted.length)}
+            detail={`${strongestWins}/${strongestCompleted.length} strongest picks won`}
+          />
+
+          <StatCard
+            title="Today W/L"
+            value={`${todayWins}-${todayLosses}`}
+            detail="results updated today"
+          />
+        </div>
+
+        <div className="mt-6 grid gap-4 md:grid-cols-4">
+          <StatCard
+            title="Premier League accuracy"
+            value={getAccuracy(premierLeagueWins, premierLeagueCompleted.length)}
+            detail={`${premierLeagueWins}/${premierLeagueCompleted.length} first-choice wins`}
           />
 
           <StatCard
@@ -569,7 +746,7 @@ export default async function Home({
           />
 
           <StatCard
-            title="Strongest pick"
+            title="Current strongest pick"
             value={
               strongestPick
                 ? `${Math.max(
@@ -624,6 +801,18 @@ export default async function Home({
             </div>
           ) : null}
 
+          {params?.result === "updated" ? (
+            <div className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-bold text-emerald-300">
+              Result updated successfully.
+            </div>
+          ) : null}
+
+          {params?.result === "reset" ? (
+            <div className="mt-4 rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm font-bold text-slate-300">
+              Result reset to pending.
+            </div>
+          ) : null}
+
           <div className="mt-5 grid gap-3">
             {savedPredictions.length === 0 ? (
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
@@ -631,30 +820,11 @@ export default async function Home({
               </div>
             ) : (
               savedPredictions.map((prediction) => (
-                <div
+                <SavedPredictionRow
                   key={prediction.id}
-                  className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-950 p-4 md:grid-cols-[1fr_auto_auto]"
-                >
-                  <div>
-                    <p className="font-black text-white">
-                      {prediction.homeTeam} vs {prediction.awayTeam}
-                    </p>
-
-                    <p className="mt-1 text-sm text-slate-400">
-                      {prediction.kickoff
-                        ? formatKickoff(prediction.kickoff.toISOString())
-                        : "Kickoff TBC"}
-                    </p>
-                  </div>
-
-                  <div className="text-sm font-bold text-slate-300">
-                    First: {getOutcomeLabel(prediction.firstChoice)}
-                  </div>
-
-                  <div className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-sm font-black text-amber-300">
-                    {prediction.status}
-                  </div>
-                </div>
+                  prediction={prediction}
+                  leagueId={selectedLeague.id}
+                />
               ))
             )}
           </div>
@@ -793,6 +963,87 @@ export default async function Home({
         </div>
       </section>
     </main>
+  );
+}
+
+function SavedPredictionRow({
+  prediction,
+  leagueId,
+}: {
+  prediction: SavedPrediction;
+  leagueId: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+      <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
+        <div>
+          <p className="font-black text-white">
+            {prediction.homeTeam} vs {prediction.awayTeam}
+          </p>
+
+          <p className="mt-1 text-sm text-slate-400">
+            {prediction.kickoff
+              ? formatKickoff(prediction.kickoff.toISOString())
+              : "Kickoff TBC"}
+          </p>
+
+          <div className="mt-3 flex flex-wrap gap-2 text-xs font-black">
+            <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
+              First: {getOutcomeLabel(prediction.firstChoice)}
+            </span>
+
+            <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
+              Second: {getOutcomeLabel(prediction.secondChoice)}
+            </span>
+
+            <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
+              Actual: {getOutcomeLabel(prediction.actualResult)}
+            </span>
+
+            <span
+              className={`rounded-full border px-3 py-1 ${
+                prediction.firstChoiceResult === "WON"
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : prediction.firstChoiceResult === "LOST"
+                    ? "border-red-500/40 bg-red-500/10 text-red-300"
+                    : "border-amber-500/40 bg-amber-500/10 text-amber-300"
+              }`}
+            >
+              {prediction.firstChoiceResult || prediction.status}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {(["HOME", "DRAW", "AWAY"] as Outcome[]).map((result) => (
+            <form key={result} action={updateResult}>
+              <input type="hidden" name="id" value={prediction.id} />
+              <input type="hidden" name="leagueId" value={leagueId} />
+              <input type="hidden" name="actualResult" value={result} />
+
+              <button
+                type="submit"
+                className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-black text-slate-200 hover:border-amber-400 hover:text-amber-300"
+              >
+                {getOutcomeShortLabel(result)}
+              </button>
+            </form>
+          ))}
+
+          <form action={resetResult}>
+            <input type="hidden" name="id" value={prediction.id} />
+            <input type="hidden" name="leagueId" value={leagueId} />
+
+            <button
+              type="submit"
+              className="rounded-xl border border-red-500/40 px-3 py-2 text-xs font-black text-red-300 hover:bg-red-500/10"
+            >
+              Reset
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
   );
 }
 
