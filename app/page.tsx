@@ -70,16 +70,18 @@ function readObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function getOutcomeLabel(outcome: Outcome) {
+function getOutcomeLabel(outcome: Outcome | string | null | undefined) {
   if (outcome === "HOME") return "Home win";
   if (outcome === "DRAW") return "Draw";
-  return "Away win";
+  if (outcome === "AWAY") return "Away win";
+  return "Not set";
 }
 
-function getOutcomeShortLabel(outcome: Outcome) {
+function getOutcomeShortLabel(outcome: Outcome | string | null | undefined) {
   if (outcome === "HOME") return "1";
   if (outcome === "DRAW") return "X";
-  return "2";
+  if (outcome === "AWAY") return "2";
+  return "-";
 }
 
 function getTopChoices(home: number, draw: number, away: number) {
@@ -334,6 +336,8 @@ async function saveLeagueSnapshot(formData: FormData) {
       prediction.awayPercent
     );
 
+    const kickoffDate = parseKickoffDate(prediction.kickoffIso);
+
     const existing = prediction.fixtureId
       ? await prisma.predictionHistory.findFirst({
           where: {
@@ -341,7 +345,14 @@ async function saveLeagueSnapshot(formData: FormData) {
             leagueId: prediction.leagueId,
           },
         })
-      : null;
+      : await prisma.predictionHistory.findFirst({
+          where: {
+            leagueId: prediction.leagueId,
+            homeTeam: prediction.homeTeam,
+            awayTeam: prediction.awayTeam,
+            kickoff: kickoffDate,
+          },
+        });
 
     const data = {
       fixtureId: prediction.fixtureId || null,
@@ -349,7 +360,7 @@ async function saveLeagueSnapshot(formData: FormData) {
       leagueName: prediction.league,
       homeTeam: prediction.homeTeam,
       awayTeam: prediction.awayTeam,
-      kickoff: parseKickoffDate(prediction.kickoffIso),
+      kickoff: kickoffDate,
       firstChoice: prediction.firstChoice,
       secondChoice: prediction.secondChoice,
       homeWinPercent: prediction.homePercent,
@@ -357,6 +368,7 @@ async function saveLeagueSnapshot(formData: FormData) {
       awayWinPercent: prediction.awayPercent,
       strongestPick: prediction.firstChoice,
       strongestPercent,
+      status: "PENDING",
     };
 
     if (existing) {
@@ -439,6 +451,16 @@ export default async function Home({
   }
 
   const { predictions, error } = await getPredictions(selectedLeague.id);
+
+  const savedPredictions = await prisma.predictionHistory.findMany({
+    where: {
+      leagueId: Number(selectedLeague.id),
+    },
+    orderBy: {
+      savedAt: "desc",
+    },
+    take: 8,
+  });
 
   const strongestPick = [...predictions].sort((a, b) => {
     const aMax = Math.max(a.homePercent, a.drawPercent, a.awayPercent);
@@ -561,9 +583,9 @@ export default async function Home({
           />
 
           <StatCard
-            title="Avg top pick"
-            value={`${averageTopPick}%`}
-            detail="model signal"
+            title="Saved records"
+            value={String(savedPredictions.length)}
+            detail="latest stored rows"
           />
         </div>
 
@@ -579,8 +601,8 @@ export default async function Home({
               </h2>
 
               <p className="mt-1 text-sm text-slate-400">
-                Stores the current league predictions in the admin database for
-                future result tracking and accuracy analytics.
+                Stores the current league predictions in PredictionHistory for
+                future result tracking and graph reporting.
               </p>
             </div>
 
@@ -601,6 +623,41 @@ export default async function Home({
               Snapshot saved successfully for {selectedLeague.name}.
             </div>
           ) : null}
+
+          <div className="mt-5 grid gap-3">
+            {savedPredictions.length === 0 ? (
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
+                No saved predictions yet for {selectedLeague.name}.
+              </div>
+            ) : (
+              savedPredictions.map((prediction) => (
+                <div
+                  key={prediction.id}
+                  className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-950 p-4 md:grid-cols-[1fr_auto_auto]"
+                >
+                  <div>
+                    <p className="font-black text-white">
+                      {prediction.homeTeam} vs {prediction.awayTeam}
+                    </p>
+
+                    <p className="mt-1 text-sm text-slate-400">
+                      {prediction.kickoff
+                        ? formatKickoff(prediction.kickoff.toISOString())
+                        : "Kickoff TBC"}
+                    </p>
+                  </div>
+
+                  <div className="text-sm font-bold text-slate-300">
+                    First: {getOutcomeLabel(prediction.firstChoice)}
+                  </div>
+
+                  <div className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-sm font-black text-amber-300">
+                    {prediction.status}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </div>
 
         {error ? (
