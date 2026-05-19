@@ -7,26 +7,36 @@ datasource db {
 }
 
 model PredictionHistory {
-  id               Int      @id @default(autoincrement())
+  id                  Int      @id @default(autoincrement())
 
-  fixtureId        Int?
-  leagueId         Int?
-  leagueName       String?
+  fixtureId           Int?
+  leagueId            Int?
+  leagueName          String?
 
-  homeTeam         String
-  awayTeam         String
+  homeTeam            String
+  awayTeam            String
 
-  kickoff          DateTime?
+  kickoff             DateTime?
 
-  firstChoice      String?
-  secondChoice     String?
+  firstChoice         String?
+  secondChoice        String?
 
-  homeWinPercent   Float?
-  drawPercent      Float?
-  awayWinPercent   Float?
+  homeWinPercent      Float?
+  drawPercent         Float?
+  awayWinPercent      Float?
 
-  strongestPick    String?
-  strongestPercent Float?
+  strongestPick       String?
+  strongestPercent    Float?
 
-  createdAt        DateTime @default(now())
+  actualResult        String?
+  firstChoiceResult   String?
+  secondChoiceResult  String?
+  status              String   @default("PENDING")
+
+  savedAt             DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([fixtureId])
+  @@index([leagueId])
+  @@index([status])
 }
