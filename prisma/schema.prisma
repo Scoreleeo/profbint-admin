@@ -10,11 +10,12 @@ model PredictionHistory {
   id                  Int      @id @default(autoincrement())
 
   fixtureId           Int?
-  leagueId            Int?
-  leagueName          String?
+leagueId            Int?
+leagueName          String?
+season              String   @default("2025/26")
 
-  homeTeam            String
-  awayTeam            String
+homeTeam            String
+awayTeam            String
 
   kickoff             DateTime?
 
