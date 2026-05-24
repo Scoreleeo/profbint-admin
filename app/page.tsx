@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 
 type Outcome = "HOME" | "DRAW" | "AWAY";
+type ResultFilter = "all" | "pending" | "won" | "lost";
 
 type RawPrediction = Record<string, unknown>;
 
@@ -70,6 +71,13 @@ const LEAGUES: LeagueOption[] = [
   { id: "94", name: "Primeira Liga", shortName: "Primeira Liga" },
 ];
 
+const FILTERS: { id: ResultFilter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "pending", label: "Pending" },
+  { id: "won", label: "Won" },
+  { id: "lost", label: "Lost" },
+];
+
 function readString(value: unknown, fallback = "") {
   return typeof value === "string" && value.trim() ? value : fallback;
 }
@@ -93,6 +101,22 @@ function readObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function normaliseFilter(value: string | undefined): ResultFilter {
+  if (value === "pending" || value === "won" || value === "lost") {
+    return value;
+  }
+
+  return "all";
+}
+
+function getLeagueHref(leagueId: string, filter: ResultFilter) {
+  return `/?league=${leagueId}&filter=${filter}`;
+}
+
+function getResultRedirect(leagueId: string, filter: ResultFilter, result: string) {
+  return `/?league=${leagueId}&filter=${filter}&result=${result}`;
+}
+
 function getOutcomeLabel(outcome: Outcome | string | null | undefined) {
   if (outcome === "HOME") return "Home win";
   if (outcome === "DRAW") return "Draw";
@@ -105,6 +129,20 @@ function getOutcomeShortLabel(outcome: Outcome | string | null | undefined) {
   if (outcome === "DRAW") return "X";
   if (outcome === "AWAY") return "2";
   return "-";
+}
+
+function getStatusLabel(status: string | null | undefined) {
+  if (status === "WON") return "WON";
+  if (status === "LOST") return "LOST";
+  return "PENDING";
+}
+
+function getStrongestPickResult(prediction: SavedPrediction) {
+  if (!prediction.actualResult || !prediction.strongestPick) {
+    return "PENDING";
+  }
+
+  return prediction.strongestPick === prediction.actualResult ? "WON" : "LOST";
 }
 
 function getTopChoices(home: number, draw: number, away: number) {
@@ -362,6 +400,7 @@ async function saveLeagueSnapshot(formData: FormData) {
   }
 
   const leagueId = String(formData.get("leagueId") || "39");
+  const filter = normaliseFilter(String(formData.get("filter") || "all"));
   const selectedLeague =
     LEAGUES.find((league) => league.id === leagueId) || LEAGUES[0];
 
@@ -392,7 +431,7 @@ async function saveLeagueSnapshot(formData: FormData) {
           },
         });
 
-    const data = {
+    const baseData = {
       fixtureId: prediction.fixtureId || null,
       leagueId: prediction.leagueId,
       leagueName: prediction.league,
@@ -406,7 +445,6 @@ async function saveLeagueSnapshot(formData: FormData) {
       awayWinPercent: prediction.awayPercent,
       strongestPick: prediction.firstChoice,
       strongestPercent,
-      status: "PENDING",
     };
 
     if (existing) {
@@ -414,16 +452,22 @@ async function saveLeagueSnapshot(formData: FormData) {
         where: {
           id: existing.id,
         },
-        data,
+        data: baseData,
       });
     } else {
       await prisma.predictionHistory.create({
-        data,
+        data: {
+          ...baseData,
+          actualResult: null,
+          firstChoiceResult: null,
+          secondChoiceResult: null,
+          status: "PENDING",
+        },
       });
     }
   }
 
-  redirect(`/?league=${selectedLeague.id}&saved=true`);
+  redirect(`/?league=${selectedLeague.id}&filter=${filter}&saved=true`);
 }
 
 async function updateResult(formData: FormData) {
@@ -438,10 +482,11 @@ async function updateResult(formData: FormData) {
 
   const id = Number(formData.get("id"));
   const leagueId = String(formData.get("leagueId") || "39");
+  const filter = normaliseFilter(String(formData.get("filter") || "all"));
   const actualResult = String(formData.get("actualResult") || "");
 
   if (!id || !["HOME", "DRAW", "AWAY"].includes(actualResult)) {
-    redirect(`/?league=${leagueId}`);
+    redirect(getLeagueHref(leagueId, filter));
   }
 
   const prediction = await prisma.predictionHistory.findUnique({
@@ -449,7 +494,7 @@ async function updateResult(formData: FormData) {
   });
 
   if (!prediction) {
-    redirect(`/?league=${leagueId}`);
+    redirect(getLeagueHref(leagueId, filter));
   }
 
   const firstChoiceResult =
@@ -468,7 +513,7 @@ async function updateResult(formData: FormData) {
     },
   });
 
-  redirect(`/?league=${leagueId}&result=updated`);
+  redirect(getResultRedirect(leagueId, filter, "updated"));
 }
 
 async function resetResult(formData: FormData) {
@@ -483,9 +528,10 @@ async function resetResult(formData: FormData) {
 
   const id = Number(formData.get("id"));
   const leagueId = String(formData.get("leagueId") || "39");
+  const filter = normaliseFilter(String(formData.get("filter") || "all"));
 
   if (!id) {
-    redirect(`/?league=${leagueId}`);
+    redirect(getLeagueHref(leagueId, filter));
   }
 
   await prisma.predictionHistory.update({
@@ -498,7 +544,7 @@ async function resetResult(formData: FormData) {
     },
   });
 
-  redirect(`/?league=${leagueId}&result=reset`);
+  redirect(getResultRedirect(leagueId, filter, "reset"));
 }
 
 export default async function Home({
@@ -507,6 +553,7 @@ export default async function Home({
   searchParams?: Promise<{
     error?: string;
     league?: string;
+    filter?: string;
     saved?: string;
     result?: string;
   }>;
@@ -516,6 +563,7 @@ export default async function Home({
 
   const isLoggedIn = cookieStore.get("profbint_admin")?.value === "true";
   const selectedLeagueId = params?.league || "39";
+  const selectedFilter = normaliseFilter(params?.filter);
   const selectedLeague =
     LEAGUES.find((league) => league.id === selectedLeagueId) || LEAGUES[0];
 
@@ -531,8 +579,8 @@ export default async function Home({
             <h1 className="mt-4 text-3xl font-black">Admin dashboard</h1>
 
             <p className="mt-3 text-sm leading-6 text-slate-300">
-              Private unlocked 1X2 prediction view. No Stripe. No basket. No
-              public app unlock logic.
+              Private prediction tracking, saved snapshots, and accuracy
+              reporting for the Pro Football Intel admin app.
             </p>
 
             <form action={login} className="mt-6 space-y-4">
@@ -570,19 +618,40 @@ export default async function Home({
 
   const { predictions, error } = await getPredictions(selectedLeague.id);
 
+  const savedWhere =
+    selectedFilter === "pending"
+      ? {
+          leagueId: Number(selectedLeague.id),
+          status: "PENDING",
+        }
+      : selectedFilter === "won"
+        ? {
+            leagueId: Number(selectedLeague.id),
+            firstChoiceResult: "WON",
+          }
+        : selectedFilter === "lost"
+          ? {
+              leagueId: Number(selectedLeague.id),
+              firstChoiceResult: "LOST",
+            }
+          : {
+              leagueId: Number(selectedLeague.id),
+            };
+
   const savedPredictions = await prisma.predictionHistory.findMany({
-    where: {
-      leagueId: Number(selectedLeague.id),
-    },
+    where: savedWhere,
     orderBy: {
       savedAt: "desc",
     },
-    take: 12,
+    take: 20,
   });
 
   const allCompleted = await prisma.predictionHistory.findMany({
     where: {
       status: "RESULTED",
+      actualResult: {
+        not: null,
+      },
     },
   });
 
@@ -646,18 +715,23 @@ export default async function Home({
               </p>
 
               <h1 className="mt-4 text-3xl font-black tracking-tight md:text-5xl">
-                Control dashboard
+                Result tracking dashboard
               </h1>
 
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
-                Internal unlocked prediction view powered only by the Pro
-                Football Intel prediction API. Select a league to inspect its
-                home win, draw, and away win intelligence.
+                Save prediction snapshots, update actual 1X2 results, and track
+                first-choice, second-choice, and strongest-pick performance.
               </p>
             </div>
 
             <div className="flex flex-col gap-3 sm:flex-row">
-              <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-5 py-3 text-sm font-bold text-emerald-300">
+              <div
+                className={`rounded-2xl border px-5 py-3 text-sm font-bold ${
+                  error
+                    ? "border-red-500/30 bg-red-500/10 text-red-300"
+                    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                }`}
+              >
                 API {error ? "issue" : "online"}
               </div>
 
@@ -685,7 +759,7 @@ export default async function Home({
               return (
                 <a
                   key={league.id}
-                  href={`/?league=${league.id}`}
+                  href={getLeagueHref(league.id, selectedFilter)}
                   className={`rounded-2xl border px-4 py-3 text-sm font-black transition ${
                     isActive
                       ? "border-amber-400 bg-amber-400 text-slate-950"
@@ -706,17 +780,23 @@ export default async function Home({
           </div>
         </nav>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-4">
+        <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
           <StatCard
             title={`${selectedLeague.shortName} accuracy`}
             value={getAccuracy(selectedLeagueWins, selectedLeagueCompleted.length)}
-            detail={`${selectedLeagueWins}/${selectedLeagueCompleted.length} first-choice wins`}
+            detail={`${selectedLeagueWins}/${selectedLeagueCompleted.length} resulted first-choice wins`}
           />
 
           <StatCard
-            title="Overall accuracy"
+            title="Overall first-choice accuracy"
             value={getAccuracy(overallWins, allCompleted.length)}
-            detail={`${overallWins}/${allCompleted.length} first-choice wins`}
+            detail={`${overallWins}/${allCompleted.length} resulted predictions`}
+          />
+
+          <StatCard
+            title="Premier League accuracy"
+            value={getAccuracy(premierLeagueWins, premierLeagueCompleted.length)}
+            detail={`${premierLeagueWins}/${premierLeagueCompleted.length} resulted first-choice wins`}
           />
 
           <StatCard
@@ -726,23 +806,17 @@ export default async function Home({
           />
 
           <StatCard
-            title="Today W/L"
+            title="Daily W/L"
             value={`${todayWins}-${todayLosses}`}
-            detail="results updated today"
+            detail={`${todayCompleted.length} resulted today`}
           />
         </div>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-4">
-          <StatCard
-            title="Premier League accuracy"
-            value={getAccuracy(premierLeagueWins, premierLeagueCompleted.length)}
-            detail={`${premierLeagueWins}/${premierLeagueCompleted.length} first-choice wins`}
-          />
-
+        <div className="mt-6 grid gap-4 md:grid-cols-3">
           <StatCard
             title="Live matches"
             value={String(predictions.length)}
-            detail="from Pro Football Intel"
+            detail={`${selectedLeague.name} from Pro Football Intel API`}
           />
 
           <StatCard
@@ -756,13 +830,17 @@ export default async function Home({
                   )}%`
                 : "0%"
             }
-            detail={strongestPick ? strongestPick.league : "waiting for data"}
+            detail={
+              strongestPick
+                ? `${strongestPick.homeTeam} vs ${strongestPick.awayTeam}`
+                : "waiting for data"
+            }
           />
 
           <StatCard
-            title="Saved records"
+            title="Visible saved records"
             value={String(savedPredictions.length)}
-            detail="latest stored rows"
+            detail={`${selectedFilter.toUpperCase()} filter for ${selectedLeague.shortName}`}
           />
         </div>
 
@@ -770,27 +848,28 @@ export default async function Home({
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
               <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
-                Prediction history
+                Saved prediction history
               </p>
 
               <h2 className="mt-2 text-2xl font-black">
-                Save {selectedLeague.name} snapshot
+                {selectedLeague.name} result tracker
               </h2>
 
               <p className="mt-1 text-sm text-slate-400">
-                Stores the current league predictions in PredictionHistory for
-                future result tracking and graph reporting.
+                Filter saved predictions, update actual results, and preserve
+                completed rows for future accuracy graphs.
               </p>
             </div>
 
             <form action={saveLeagueSnapshot}>
               <input type="hidden" name="leagueId" value={selectedLeague.id} />
+              <input type="hidden" name="filter" value={selectedFilter} />
 
               <button
                 type="submit"
                 className="rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-slate-950 hover:bg-amber-300"
               >
-                Save current league
+                Save current league snapshot
               </button>
             </form>
           </div>
@@ -813,10 +892,31 @@ export default async function Home({
             </div>
           ) : null}
 
+          <div className="mt-5 flex flex-wrap gap-2">
+            {FILTERS.map((filter) => {
+              const isActive = filter.id === selectedFilter;
+
+              return (
+                <a
+                  key={filter.id}
+                  href={getLeagueHref(selectedLeague.id, filter.id)}
+                  className={`rounded-2xl border px-4 py-2 text-sm font-black transition ${
+                    isActive
+                      ? "border-amber-400 bg-amber-400 text-slate-950"
+                      : "border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-400 hover:text-amber-300"
+                  }`}
+                >
+                  {filter.label}
+                </a>
+              );
+            })}
+          </div>
+
           <div className="mt-5 grid gap-3">
             {savedPredictions.length === 0 ? (
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
-                No saved predictions yet for {selectedLeague.name}.
+                No {selectedFilter === "all" ? "" : selectedFilter} saved
+                predictions found for {selectedLeague.name}.
               </div>
             ) : (
               savedPredictions.map((prediction) => (
@@ -824,6 +924,7 @@ export default async function Home({
                   key={prediction.id}
                   prediction={prediction}
                   leagueId={selectedLeague.id}
+                  filter={selectedFilter}
                 />
               ))
             )}
@@ -840,7 +941,7 @@ export default async function Home({
         <div className="mt-8 flex flex-col gap-3 border-b border-slate-800 pb-5 md:flex-row md:items-end md:justify-between">
           <div>
             <h2 className="text-2xl font-black">
-              {selectedLeague.name} prediction board
+              {selectedLeague.name} live prediction board
             </h2>
 
             <p className="mt-1 text-sm text-slate-400">
@@ -969,17 +1070,27 @@ export default async function Home({
 function SavedPredictionRow({
   prediction,
   leagueId,
+  filter,
 }: {
   prediction: SavedPrediction;
   leagueId: string;
+  filter: ResultFilter;
 }) {
+  const strongestPickResult = getStrongestPickResult(prediction);
+
   return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-      <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
+    <div className="rounded-3xl border border-slate-800 bg-slate-950 p-4 shadow-lg">
+      <div className="grid gap-5 xl:grid-cols-[1fr_auto] xl:items-center">
         <div>
-          <p className="font-black text-white">
-            {prediction.homeTeam} vs {prediction.awayTeam}
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-lg font-black text-white">
+              {prediction.homeTeam} vs {prediction.awayTeam}
+            </p>
+
+            <span className="rounded-full border border-slate-700 px-3 py-1 text-xs font-black text-slate-300">
+              {prediction.status}
+            </span>
+          </div>
 
           <p className="mt-1 text-sm text-slate-400">
             {prediction.kickoff
@@ -987,30 +1098,42 @@ function SavedPredictionRow({
               : "Kickoff TBC"}
           </p>
 
-          <div className="mt-3 flex flex-wrap gap-2 text-xs font-black">
-            <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
-              First: {getOutcomeLabel(prediction.firstChoice)}
-            </span>
+          <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <MiniResultBox
+              title="First choice"
+              value={`${getOutcomeShortLabel(
+                prediction.firstChoice
+              )} · ${getOutcomeLabel(prediction.firstChoice)}`}
+              status={getStatusLabel(prediction.firstChoiceResult)}
+            />
 
-            <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
-              Second: {getOutcomeLabel(prediction.secondChoice)}
-            </span>
+            <MiniResultBox
+              title="Second choice"
+              value={`${getOutcomeShortLabel(
+                prediction.secondChoice
+              )} · ${getOutcomeLabel(prediction.secondChoice)}`}
+              status={getStatusLabel(prediction.secondChoiceResult)}
+            />
 
-            <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
-              Actual: {getOutcomeLabel(prediction.actualResult)}
-            </span>
+            <MiniResultBox
+              title="Actual result"
+              value={`${getOutcomeShortLabel(
+                prediction.actualResult
+              )} · ${getOutcomeLabel(prediction.actualResult)}`}
+              status={prediction.actualResult ? "RESULTED" : "PENDING"}
+            />
 
-            <span
-              className={`rounded-full border px-3 py-1 ${
-                prediction.firstChoiceResult === "WON"
-                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                  : prediction.firstChoiceResult === "LOST"
-                    ? "border-red-500/40 bg-red-500/10 text-red-300"
-                    : "border-amber-500/40 bg-amber-500/10 text-amber-300"
+            <MiniResultBox
+              title="Strongest pick"
+              value={`${getOutcomeShortLabel(
+                prediction.strongestPick
+              )} · ${getOutcomeLabel(prediction.strongestPick)}${
+                prediction.strongestPercent
+                  ? ` · ${prediction.strongestPercent}%`
+                  : ""
               }`}
-            >
-              {prediction.firstChoiceResult || prediction.status}
-            </span>
+              status={strongestPickResult}
+            />
           </div>
         </div>
 
@@ -1019,11 +1142,12 @@ function SavedPredictionRow({
             <form key={result} action={updateResult}>
               <input type="hidden" name="id" value={prediction.id} />
               <input type="hidden" name="leagueId" value={leagueId} />
+              <input type="hidden" name="filter" value={filter} />
               <input type="hidden" name="actualResult" value={result} />
 
               <button
                 type="submit"
-                className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-black text-slate-200 hover:border-amber-400 hover:text-amber-300"
+                className="rounded-xl border border-slate-700 px-4 py-2 text-xs font-black text-slate-200 hover:border-amber-400 hover:text-amber-300"
               >
                 {getOutcomeShortLabel(result)}
               </button>
@@ -1033,16 +1157,55 @@ function SavedPredictionRow({
           <form action={resetResult}>
             <input type="hidden" name="id" value={prediction.id} />
             <input type="hidden" name="leagueId" value={leagueId} />
+            <input type="hidden" name="filter" value={filter} />
 
             <button
               type="submit"
-              className="rounded-xl border border-red-500/40 px-3 py-2 text-xs font-black text-red-300 hover:bg-red-500/10"
+              className="rounded-xl border border-red-500/40 px-4 py-2 text-xs font-black text-red-300 hover:bg-red-500/10"
             >
               Reset
             </button>
           </form>
         </div>
       </div>
+    </div>
+  );
+}
+
+function MiniResultBox({
+  title,
+  value,
+  status,
+}: {
+  title: string;
+  value: string;
+  status: string;
+}) {
+  const isWon = status === "WON";
+  const isLost = status === "LOST";
+  const isPending = status === "PENDING";
+
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-3">
+      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">
+        {title}
+      </p>
+
+      <p className="mt-2 text-sm font-black text-white">{value}</p>
+
+      <span
+        className={`mt-3 inline-flex rounded-full border px-3 py-1 text-xs font-black ${
+          isWon
+            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+            : isLost
+              ? "border-red-500/40 bg-red-500/10 text-red-300"
+              : isPending
+                ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                : "border-slate-700 bg-slate-950 text-slate-300"
+        }`}
+      >
+        {status}
+      </span>
     </div>
   );
 }
