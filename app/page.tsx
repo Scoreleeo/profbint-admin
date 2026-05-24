@@ -6,6 +6,8 @@ import { prisma } from "@/lib/prisma";
 
 type Outcome = "HOME" | "DRAW" | "AWAY";
 type ResultFilter = "all" | "pending" | "won" | "lost";
+type SortOrder = "newest" | "oldest";
+type SeasonValue = "2025-26" | "2026-27";
 
 type RawPrediction = Record<string, unknown>;
 
@@ -41,6 +43,7 @@ type SavedPrediction = {
   fixtureId: number | null;
   leagueId: number | null;
   leagueName: string | null;
+  season: string | null;
   homeTeam: string;
   awayTeam: string;
   kickoff: Date | null;
@@ -57,6 +60,13 @@ type SavedPrediction = {
   status: string;
   savedAt: Date;
   updatedAt: Date;
+};
+
+type AccuracyStats = {
+  completed: number;
+  wins: number;
+  losses: number;
+  accuracy: string;
 };
 
 const PROFBINT_PREDICTIONS_URL = "https://profbint.com/api/predictions";
@@ -76,6 +86,11 @@ const FILTERS: { id: ResultFilter; label: string }[] = [
   { id: "pending", label: "Pending" },
   { id: "won", label: "Won" },
   { id: "lost", label: "Lost" },
+];
+
+const SEASONS: { value: SeasonValue; label: string }[] = [
+  { value: "2025-26", label: "2025/26" },
+  { value: "2026-27", label: "2026/27" },
 ];
 
 function readString(value: unknown, fallback = "") {
@@ -109,12 +124,53 @@ function normaliseFilter(value: string | undefined): ResultFilter {
   return "all";
 }
 
-function getLeagueHref(leagueId: string, filter: ResultFilter) {
-  return `/?league=${leagueId}&filter=${filter}`;
+function normaliseSort(value: string | undefined): SortOrder {
+  if (value === "oldest") {
+    return "oldest";
+  }
+
+  return "newest";
 }
 
-function getResultRedirect(leagueId: string, filter: ResultFilter, result: string) {
-  return `/?league=${leagueId}&filter=${filter}&result=${result}`;
+function normaliseSeason(value: string | undefined): SeasonValue {
+  if (value === "2026-27") {
+    return "2026-27";
+  }
+
+  return "2025-26";
+}
+
+function getSeasonLabel(season: string | null | undefined) {
+  if (season === "2026-27") return "2026/27";
+  return "2025/26";
+}
+
+function buildHref({
+  leagueId,
+  filter,
+  season,
+  sort,
+  result,
+  saved,
+}: {
+  leagueId: string;
+  filter: ResultFilter;
+  season: SeasonValue;
+  sort: SortOrder;
+  result?: string;
+  saved?: string;
+}) {
+  const params = new URLSearchParams();
+
+  params.set("league", leagueId);
+  params.set("filter", filter);
+  params.set("season", season);
+  params.set("sort", sort);
+
+  if (result) params.set("result", result);
+  if (saved) params.set("saved", saved);
+
+  return `/?${params.toString()}`;
 }
 
 function getOutcomeLabel(outcome: Outcome | string | null | undefined) {
@@ -199,6 +255,52 @@ function getTodayRange() {
   end.setHours(23, 59, 59, 999);
 
   return { start, end };
+}
+
+function getAccuracyStats(predictions: SavedPrediction[]): AccuracyStats {
+  const completed = predictions.filter(
+    (prediction) =>
+      prediction.status === "RESULTED" &&
+      prediction.actualResult &&
+      prediction.firstChoiceResult
+  );
+
+  const wins = completed.filter(
+    (prediction) => prediction.firstChoiceResult === "WON"
+  ).length;
+
+  const losses = completed.filter(
+    (prediction) => prediction.firstChoiceResult === "LOST"
+  ).length;
+
+  return {
+    completed: completed.length,
+    wins,
+    losses,
+    accuracy: getAccuracy(wins, completed.length),
+  };
+}
+
+function getStrongestAccuracyStats(predictions: SavedPrediction[]): AccuracyStats {
+  const completed = predictions.filter(
+    (prediction) =>
+      prediction.status === "RESULTED" &&
+      prediction.actualResult &&
+      prediction.strongestPick
+  );
+
+  const wins = completed.filter(
+    (prediction) => prediction.strongestPick === prediction.actualResult
+  ).length;
+
+  const losses = completed.length - wins;
+
+  return {
+    completed: completed.length,
+    wins,
+    losses,
+    accuracy: getAccuracy(wins, completed.length),
+  };
 }
 
 function normalisePrediction(
@@ -401,6 +503,9 @@ async function saveLeagueSnapshot(formData: FormData) {
 
   const leagueId = String(formData.get("leagueId") || "39");
   const filter = normaliseFilter(String(formData.get("filter") || "all"));
+  const season = normaliseSeason(String(formData.get("season") || "2025-26"));
+  const sort = normaliseSort(String(formData.get("sort") || "newest"));
+
   const selectedLeague =
     LEAGUES.find((league) => league.id === leagueId) || LEAGUES[0];
 
@@ -420,11 +525,13 @@ async function saveLeagueSnapshot(formData: FormData) {
           where: {
             fixtureId: prediction.fixtureId,
             leagueId: prediction.leagueId,
+            season,
           },
         })
       : await prisma.predictionHistory.findFirst({
           where: {
             leagueId: prediction.leagueId,
+            season,
             homeTeam: prediction.homeTeam,
             awayTeam: prediction.awayTeam,
             kickoff: kickoffDate,
@@ -434,7 +541,8 @@ async function saveLeagueSnapshot(formData: FormData) {
     const baseData = {
       fixtureId: prediction.fixtureId || null,
       leagueId: prediction.leagueId,
-      leagueName: prediction.league,
+      leagueName: selectedLeague.name,
+      season,
       homeTeam: prediction.homeTeam,
       awayTeam: prediction.awayTeam,
       kickoff: kickoffDate,
@@ -467,7 +575,15 @@ async function saveLeagueSnapshot(formData: FormData) {
     }
   }
 
-  redirect(`/?league=${selectedLeague.id}&filter=${filter}&saved=true`);
+  redirect(
+    buildHref({
+      leagueId: selectedLeague.id,
+      filter,
+      season,
+      sort,
+      saved: "true",
+    })
+  );
 }
 
 async function updateResult(formData: FormData) {
@@ -483,10 +599,12 @@ async function updateResult(formData: FormData) {
   const id = Number(formData.get("id"));
   const leagueId = String(formData.get("leagueId") || "39");
   const filter = normaliseFilter(String(formData.get("filter") || "all"));
+  const season = normaliseSeason(String(formData.get("season") || "2025-26"));
+  const sort = normaliseSort(String(formData.get("sort") || "newest"));
   const actualResult = String(formData.get("actualResult") || "");
 
   if (!id || !["HOME", "DRAW", "AWAY"].includes(actualResult)) {
-    redirect(getLeagueHref(leagueId, filter));
+    redirect(buildHref({ leagueId, filter, season, sort }));
   }
 
   const prediction = await prisma.predictionHistory.findUnique({
@@ -494,7 +612,7 @@ async function updateResult(formData: FormData) {
   });
 
   if (!prediction) {
-    redirect(getLeagueHref(leagueId, filter));
+    redirect(buildHref({ leagueId, filter, season, sort }));
   }
 
   const firstChoiceResult =
@@ -513,7 +631,15 @@ async function updateResult(formData: FormData) {
     },
   });
 
-  redirect(getResultRedirect(leagueId, filter, "updated"));
+  redirect(
+    buildHref({
+      leagueId,
+      filter,
+      season,
+      sort,
+      result: "updated",
+    })
+  );
 }
 
 async function resetResult(formData: FormData) {
@@ -529,9 +655,11 @@ async function resetResult(formData: FormData) {
   const id = Number(formData.get("id"));
   const leagueId = String(formData.get("leagueId") || "39");
   const filter = normaliseFilter(String(formData.get("filter") || "all"));
+  const season = normaliseSeason(String(formData.get("season") || "2025-26"));
+  const sort = normaliseSort(String(formData.get("sort") || "newest"));
 
   if (!id) {
-    redirect(getLeagueHref(leagueId, filter));
+    redirect(buildHref({ leagueId, filter, season, sort }));
   }
 
   await prisma.predictionHistory.update({
@@ -544,7 +672,15 @@ async function resetResult(formData: FormData) {
     },
   });
 
-  redirect(getResultRedirect(leagueId, filter, "reset"));
+  redirect(
+    buildHref({
+      leagueId,
+      filter,
+      season,
+      sort,
+      result: "reset",
+    })
+  );
 }
 
 export default async function Home({
@@ -554,6 +690,8 @@ export default async function Home({
     error?: string;
     league?: string;
     filter?: string;
+    season?: string;
+    sort?: string;
     saved?: string;
     result?: string;
   }>;
@@ -564,6 +702,9 @@ export default async function Home({
   const isLoggedIn = cookieStore.get("profbint_admin")?.value === "true";
   const selectedLeagueId = params?.league || "39";
   const selectedFilter = normaliseFilter(params?.filter);
+  const selectedSeason = normaliseSeason(params?.season);
+  const selectedSort = normaliseSort(params?.sort);
+
   const selectedLeague =
     LEAGUES.find((league) => league.id === selectedLeagueId) || LEAGUES[0];
 
@@ -579,8 +720,8 @@ export default async function Home({
             <h1 className="mt-4 text-3xl font-black">Admin dashboard</h1>
 
             <p className="mt-3 text-sm leading-6 text-slate-300">
-              Private prediction tracking, saved snapshots, and accuracy
-              reporting for the Pro Football Intel admin app.
+              Private prediction tracking, saved snapshots, season filtering,
+              and accuracy reporting for the Pro Football Intel admin app.
             </p>
 
             <form action={login} className="mt-6 space-y-4">
@@ -622,73 +763,68 @@ export default async function Home({
     selectedFilter === "pending"
       ? {
           leagueId: Number(selectedLeague.id),
+          season: selectedSeason,
           status: "PENDING",
         }
       : selectedFilter === "won"
         ? {
             leagueId: Number(selectedLeague.id),
+            season: selectedSeason,
             firstChoiceResult: "WON",
           }
         : selectedFilter === "lost"
           ? {
               leagueId: Number(selectedLeague.id),
+              season: selectedSeason,
               firstChoiceResult: "LOST",
             }
           : {
               leagueId: Number(selectedLeague.id),
+              season: selectedSeason,
             };
 
   const savedPredictions = await prisma.predictionHistory.findMany({
     where: savedWhere,
     orderBy: {
-      savedAt: "desc",
+      savedAt: selectedSort === "oldest" ? "asc" : "desc",
     },
-    take: 20,
+    take: 30,
   });
 
-  const allCompleted = await prisma.predictionHistory.findMany({
+  const seasonPredictions = await prisma.predictionHistory.findMany({
     where: {
-      status: "RESULTED",
-      actualResult: {
-        not: null,
-      },
+      season: selectedSeason,
+    },
+    orderBy: {
+      savedAt: "asc",
     },
   });
 
-  const selectedLeagueCompleted = allCompleted.filter(
+  const completedSeasonPredictions = seasonPredictions.filter(
+    (prediction) =>
+      prediction.status === "RESULTED" &&
+      prediction.actualResult &&
+      prediction.firstChoiceResult
+  );
+
+  const pendingSeasonPredictions = seasonPredictions.filter(
+    (prediction) => prediction.status === "PENDING"
+  );
+
+  const selectedLeagueCompleted = completedSeasonPredictions.filter(
     (prediction) => prediction.leagueId === Number(selectedLeague.id)
   );
 
-  const premierLeagueCompleted = allCompleted.filter(
-    (prediction) => prediction.leagueId === 39
-  );
-
-  const strongestCompleted = allCompleted.filter(
-    (prediction) => prediction.strongestPick && prediction.actualResult
-  );
+  const overallStats = getAccuracyStats(seasonPredictions);
+  const selectedLeagueStats = getAccuracyStats(selectedLeagueCompleted);
+  const strongestStats = getStrongestAccuracyStats(seasonPredictions);
 
   const todayRange = getTodayRange();
 
-  const todayCompleted = allCompleted.filter((prediction) => {
+  const todayCompleted = completedSeasonPredictions.filter((prediction) => {
     const updated = new Date(prediction.updatedAt);
     return updated >= todayRange.start && updated <= todayRange.end;
   });
-
-  const overallWins = allCompleted.filter(
-    (prediction) => prediction.firstChoiceResult === "WON"
-  ).length;
-
-  const selectedLeagueWins = selectedLeagueCompleted.filter(
-    (prediction) => prediction.firstChoiceResult === "WON"
-  ).length;
-
-  const premierLeagueWins = premierLeagueCompleted.filter(
-    (prediction) => prediction.firstChoiceResult === "WON"
-  ).length;
-
-  const strongestWins = strongestCompleted.filter(
-    (prediction) => prediction.strongestPick === prediction.actualResult
-  ).length;
 
   const todayWins = todayCompleted.filter(
     (prediction) => prediction.firstChoiceResult === "WON"
@@ -697,6 +833,21 @@ export default async function Home({
   const todayLosses = todayCompleted.filter(
     (prediction) => prediction.firstChoiceResult === "LOST"
   ).length;
+
+  const leagueBreakdown = LEAGUES.map((league) => {
+    const leaguePredictions = seasonPredictions.filter(
+      (prediction) => prediction.leagueId === Number(league.id)
+    );
+
+    return {
+      ...league,
+      stats: getAccuracyStats(leaguePredictions),
+      tracked: leaguePredictions.length,
+      pending: leaguePredictions.filter(
+        (prediction) => prediction.status === "PENDING"
+      ).length,
+    };
+  });
 
   const strongestPick = [...predictions].sort((a, b) => {
     const aMax = Math.max(a.homePercent, a.drawPercent, a.awayPercent);
@@ -707,7 +858,7 @@ export default async function Home({
   return (
     <main className="min-h-screen bg-slate-950 text-white">
       <section className="mx-auto max-w-7xl px-4 py-8">
-        <header className="rounded-[2rem] border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 p-6 shadow-2xl">
+        <header className="rounded-[2rem] border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 p-5 shadow-2xl md:p-6">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div>
               <p className="text-sm font-black uppercase tracking-[0.35em] text-amber-400">
@@ -715,12 +866,13 @@ export default async function Home({
               </p>
 
               <h1 className="mt-4 text-3xl font-black tracking-tight md:text-5xl">
-                Result tracking dashboard
+                Season accuracy dashboard
               </h1>
 
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
-                Save prediction snapshots, update actual 1X2 results, and track
-                first-choice, second-choice, and strongest-pick performance.
+              <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+                Track saved predictions, update match results, filter by season,
+                and prepare clean result data for future public graphs and
+                verified performance reporting.
               </p>
             </div>
 
@@ -759,7 +911,12 @@ export default async function Home({
               return (
                 <a
                   key={league.id}
-                  href={getLeagueHref(league.id, selectedFilter)}
+                  href={buildHref({
+                    leagueId: league.id,
+                    filter: selectedFilter,
+                    season: selectedSeason,
+                    sort: selectedSort,
+                  })}
                   className={`rounded-2xl border px-4 py-3 text-sm font-black transition ${
                     isActive
                       ? "border-amber-400 bg-amber-400 text-slate-950"
@@ -780,71 +937,149 @@ export default async function Home({
           </div>
         </nav>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-          <StatCard
+        <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
+          <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
+            <div>
+              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
+                Controls
+              </p>
+
+              <h2 className="mt-2 text-2xl font-black">
+                {selectedLeague.name} · {getSeasonLabel(selectedSeason)}
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-400">
+                Filters are stored in the URL so each view can be refreshed,
+                shared, and safely returned to after result updates.
+              </p>
+            </div>
+
+            <form
+              action="/"
+              method="get"
+              className="grid gap-3 sm:grid-cols-[1fr_1fr_auto]"
+            >
+              <input type="hidden" name="league" value={selectedLeague.id} />
+              <input type="hidden" name="filter" value={selectedFilter} />
+
+              <label className="block">
+                <span className="mb-2 block text-xs font-black uppercase tracking-[0.18em] text-slate-500">
+                  Season
+                </span>
+                <select
+                  name="season"
+                  defaultValue={selectedSeason}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm font-black text-white outline-none focus:border-amber-400"
+                >
+                  {SEASONS.map((season) => (
+                    <option key={season.value} value={season.value}>
+                      {season.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-xs font-black uppercase tracking-[0.18em] text-slate-500">
+                  Sort
+                </span>
+                <select
+                  name="sort"
+                  defaultValue={selectedSort}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm font-black text-white outline-none focus:border-amber-400"
+                >
+                  <option value="newest">Newest first</option>
+                  <option value="oldest">Oldest first</option>
+                </select>
+              </label>
+
+              <button
+                type="submit"
+                className="rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-slate-950 hover:bg-amber-300 sm:self-end"
+              >
+                Apply
+              </button>
+            </form>
+          </div>
+        </section>
+
+        <section className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-7">
+          <PremiumStatCard
+            title="Overall accuracy"
+            value={overallStats.accuracy}
+            detail={`${overallStats.wins}/${overallStats.completed} resulted wins`}
+          />
+
+          <PremiumStatCard
             title={`${selectedLeague.shortName} accuracy`}
-            value={getAccuracy(selectedLeagueWins, selectedLeagueCompleted.length)}
-            detail={`${selectedLeagueWins}/${selectedLeagueCompleted.length} resulted first-choice wins`}
+            value={selectedLeagueStats.accuracy}
+            detail={`${selectedLeagueStats.wins}/${selectedLeagueStats.completed} resulted wins`}
           />
 
-          <StatCard
-            title="Overall first-choice accuracy"
-            value={getAccuracy(overallWins, allCompleted.length)}
-            detail={`${overallWins}/${allCompleted.length} resulted predictions`}
-          />
-
-          <StatCard
-            title="Premier League accuracy"
-            value={getAccuracy(premierLeagueWins, premierLeagueCompleted.length)}
-            detail={`${premierLeagueWins}/${premierLeagueCompleted.length} resulted first-choice wins`}
-          />
-
-          <StatCard
+          <PremiumStatCard
             title="Strongest pick accuracy"
-            value={getAccuracy(strongestWins, strongestCompleted.length)}
-            detail={`${strongestWins}/${strongestCompleted.length} strongest picks won`}
+            value={strongestStats.accuracy}
+            detail={`${strongestStats.wins}/${strongestStats.completed} strongest picks`}
           />
 
-          <StatCard
-            title="Daily W/L"
-            value={`${todayWins}-${todayLosses}`}
-            detail={`${todayCompleted.length} resulted today`}
-          />
-        </div>
-
-        <div className="mt-6 grid gap-4 md:grid-cols-3">
-          <StatCard
-            title="Live matches"
-            value={String(predictions.length)}
-            detail={`${selectedLeague.name} from Pro Football Intel API`}
+          <PremiumStatCard
+            title="Today wins"
+            value={String(todayWins)}
+            detail="updated today"
           />
 
-          <StatCard
-            title="Current strongest pick"
-            value={
-              strongestPick
-                ? `${Math.max(
-                    strongestPick.homePercent,
-                    strongestPick.drawPercent,
-                    strongestPick.awayPercent
-                  )}%`
-                : "0%"
-            }
-            detail={
-              strongestPick
-                ? `${strongestPick.homeTeam} vs ${strongestPick.awayTeam}`
-                : "waiting for data"
-            }
+          <PremiumStatCard
+            title="Today losses"
+            value={String(todayLosses)}
+            detail="updated today"
           />
 
-          <StatCard
-            title="Visible saved records"
-            value={String(savedPredictions.length)}
-            detail={`${selectedFilter.toUpperCase()} filter for ${selectedLeague.shortName}`}
+          <PremiumStatCard
+            title="Total tracked"
+            value={String(seasonPredictions.length)}
+            detail={`${getSeasonLabel(selectedSeason)} saved rows`}
           />
-        </div>
 
-        <div className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-5 shadow-xl">
+          <PremiumStatCard
+            title="Pending"
+            value={String(pendingSeasonPredictions.length)}
+            detail="awaiting actual result"
+          />
+        </section>
+
+        <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
+          <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
+                League accuracy breakdown
+              </p>
+
+              <h2 className="mt-2 text-2xl font-black">
+                {getSeasonLabel(selectedSeason)} performance by league
+              </h2>
+            </div>
+
+            <p className="text-sm text-slate-400">
+              Built from completed/resulted predictions only.
+            </p>
+          </div>
+
+          <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+            {leagueBreakdown.map((league) => (
+              <LeagueAccuracyCard
+                key={league.id}
+                league={league.shortName}
+                accuracy={league.stats.accuracy}
+                wins={league.stats.wins}
+                completed={league.stats.completed}
+                pending={league.pending}
+                active={league.id === selectedLeague.id}
+              />
+            ))}
+          </div>
+        </section>
+
+        <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
               <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
@@ -856,14 +1091,16 @@ export default async function Home({
               </h2>
 
               <p className="mt-1 text-sm text-slate-400">
-                Filter saved predictions, update actual results, and preserve
-                completed rows for future accuracy graphs.
+                Save the current league snapshot, then update actual results
+                with 1, X, 2, or reset back to pending.
               </p>
             </div>
 
             <form action={saveLeagueSnapshot}>
               <input type="hidden" name="leagueId" value={selectedLeague.id} />
               <input type="hidden" name="filter" value={selectedFilter} />
+              <input type="hidden" name="season" value={selectedSeason} />
+              <input type="hidden" name="sort" value={selectedSort} />
 
               <button
                 type="submit"
@@ -899,7 +1136,12 @@ export default async function Home({
               return (
                 <a
                   key={filter.id}
-                  href={getLeagueHref(selectedLeague.id, filter.id)}
+                  href={buildHref({
+                    leagueId: selectedLeague.id,
+                    filter: filter.id,
+                    season: selectedSeason,
+                    sort: selectedSort,
+                  })}
                   className={`rounded-2xl border px-4 py-2 text-sm font-black transition ${
                     isActive
                       ? "border-amber-400 bg-amber-400 text-slate-950"
@@ -910,13 +1152,46 @@ export default async function Home({
                 </a>
               );
             })}
+
+            <a
+              href={buildHref({
+                leagueId: selectedLeague.id,
+                filter: selectedFilter,
+                season: selectedSeason,
+                sort: "newest",
+              })}
+              className={`rounded-2xl border px-4 py-2 text-sm font-black transition ${
+                selectedSort === "newest"
+                  ? "border-sky-400 bg-sky-400 text-slate-950"
+                  : "border-slate-700 bg-slate-950 text-slate-300 hover:border-sky-400 hover:text-sky-300"
+              }`}
+            >
+              Newest first
+            </a>
+
+            <a
+              href={buildHref({
+                leagueId: selectedLeague.id,
+                filter: selectedFilter,
+                season: selectedSeason,
+                sort: "oldest",
+              })}
+              className={`rounded-2xl border px-4 py-2 text-sm font-black transition ${
+                selectedSort === "oldest"
+                  ? "border-sky-400 bg-sky-400 text-slate-950"
+                  : "border-slate-700 bg-slate-950 text-slate-300 hover:border-sky-400 hover:text-sky-300"
+              }`}
+            >
+              Oldest first
+            </a>
           </div>
 
           <div className="mt-5 grid gap-3">
             {savedPredictions.length === 0 ? (
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
                 No {selectedFilter === "all" ? "" : selectedFilter} saved
-                predictions found for {selectedLeague.name}.
+                predictions found for {selectedLeague.name} in{" "}
+                {getSeasonLabel(selectedSeason)}.
               </div>
             ) : (
               savedPredictions.map((prediction) => (
@@ -925,11 +1200,54 @@ export default async function Home({
                   prediction={prediction}
                   leagueId={selectedLeague.id}
                   filter={selectedFilter}
+                  season={selectedSeason}
+                  sort={selectedSort}
                 />
               ))
             )}
           </div>
-        </div>
+        </section>
+
+        <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
+          <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
+                Future graph data
+              </p>
+
+              <h2 className="mt-2 text-2xl font-black">Prepared metrics</h2>
+
+              <p className="mt-1 text-sm text-slate-400">
+                These clean season-level calculations are ready for future
+                cumulative profit, strongest-pick, league comparison, and
+                monthly trend graphs.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm font-bold text-slate-300">
+              Read-only graph prep
+            </div>
+          </div>
+
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <GraphPrepCard
+              title="Cumulative profit line"
+              detail={`${completedSeasonPredictions.length} completed rows ready`}
+            />
+            <GraphPrepCard
+              title="Strongest pick graph"
+              detail={`${strongestStats.completed} strongest-pick results ready`}
+            />
+            <GraphPrepCard
+              title="League comparison"
+              detail={`${leagueBreakdown.length} tracked leagues configured`}
+            />
+            <GraphPrepCard
+              title="Monthly trends"
+              detail={`${getSeasonLabel(selectedSeason)} season filter active`}
+            />
+          </div>
+        </section>
 
         {error ? (
           <div className="mt-6 rounded-3xl border border-red-900 bg-red-950/40 p-5 text-red-200">
@@ -1071,10 +1389,14 @@ function SavedPredictionRow({
   prediction,
   leagueId,
   filter,
+  season,
+  sort,
 }: {
   prediction: SavedPrediction;
   leagueId: string;
   filter: ResultFilter;
+  season: SeasonValue;
+  sort: SortOrder;
 }) {
   const strongestPickResult = getStrongestPickResult(prediction);
 
@@ -1089,6 +1411,10 @@ function SavedPredictionRow({
 
             <span className="rounded-full border border-slate-700 px-3 py-1 text-xs font-black text-slate-300">
               {prediction.status}
+            </span>
+
+            <span className="rounded-full border border-slate-700 px-3 py-1 text-xs font-black text-slate-400">
+              {getSeasonLabel(prediction.season)}
             </span>
           </div>
 
@@ -1143,6 +1469,8 @@ function SavedPredictionRow({
               <input type="hidden" name="id" value={prediction.id} />
               <input type="hidden" name="leagueId" value={leagueId} />
               <input type="hidden" name="filter" value={filter} />
+              <input type="hidden" name="season" value={season} />
+              <input type="hidden" name="sort" value={sort} />
               <input type="hidden" name="actualResult" value={result} />
 
               <button
@@ -1158,6 +1486,8 @@ function SavedPredictionRow({
             <input type="hidden" name="id" value={prediction.id} />
             <input type="hidden" name="leagueId" value={leagueId} />
             <input type="hidden" name="filter" value={filter} />
+            <input type="hidden" name="season" value={season} />
+            <input type="hidden" name="sort" value={sort} />
 
             <button
               type="submit"
@@ -1210,7 +1540,7 @@ function MiniResultBox({
   );
 }
 
-function StatCard({
+function PremiumStatCard({
   title,
   value,
   detail,
@@ -1220,10 +1550,65 @@ function StatCard({
   detail: string;
 }) {
   return (
-    <div className="rounded-3xl border border-slate-800 bg-slate-900 p-5 shadow-xl">
-      <p className="text-sm font-bold text-slate-400">{title}</p>
-      <p className="mt-2 text-3xl font-black text-white">{value}</p>
-      <p className="mt-1 text-sm text-slate-500">{detail}</p>
+    <div className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 to-slate-950 p-4 shadow-xl md:p-5">
+      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">
+        {title}
+      </p>
+      <p className="mt-3 text-3xl font-black text-white">{value}</p>
+      <p className="mt-2 text-sm leading-5 text-slate-400">{detail}</p>
+    </div>
+  );
+}
+
+function LeagueAccuracyCard({
+  league,
+  accuracy,
+  wins,
+  completed,
+  pending,
+  active,
+}: {
+  league: string;
+  accuracy: string;
+  wins: number;
+  completed: number;
+  pending: number;
+  active: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-2xl border p-4 ${
+        active
+          ? "border-amber-400 bg-amber-500/10"
+          : "border-slate-800 bg-slate-950"
+      }`}
+    >
+      <p
+        className={`text-sm font-black ${
+          active ? "text-amber-300" : "text-white"
+        }`}
+      >
+        {league}
+      </p>
+
+      <p className="mt-3 text-3xl font-black text-white">{accuracy}</p>
+
+      <p className="mt-2 text-xs font-bold text-slate-400">
+        {wins}/{completed} wins
+      </p>
+
+      <p className="mt-1 text-xs font-bold text-slate-500">
+        {pending} pending
+      </p>
+    </div>
+  );
+}
+
+function GraphPrepCard({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+      <p className="font-black text-white">{title}</p>
+      <p className="mt-2 text-sm text-slate-400">{detail}</p>
     </div>
   );
 }
