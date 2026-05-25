@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
+import type { ReactNode } from "react";
 
 type Outcome = "HOME" | "DRAW" | "AWAY";
 type ResultFilter = "all" | "pending" | "won" | "lost";
@@ -289,15 +290,15 @@ function getAccuracyStats(predictions: SavedPrediction[]): AccuracyStats {
     (prediction) =>
       prediction.status === "RESULTED" &&
       prediction.actualResult &&
-      prediction.firstChoiceResult
+      prediction.firstChoiceResult,
   );
 
   const wins = completed.filter(
-    (prediction) => prediction.firstChoiceResult === "WON"
+    (prediction) => prediction.firstChoiceResult === "WON",
   ).length;
 
   const losses = completed.filter(
-    (prediction) => prediction.firstChoiceResult === "LOST"
+    (prediction) => prediction.firstChoiceResult === "LOST",
   ).length;
 
   return {
@@ -313,11 +314,11 @@ function getStrongestAccuracyStats(predictions: SavedPrediction[]): AccuracyStat
     (prediction) =>
       prediction.status === "RESULTED" &&
       prediction.actualResult &&
-      prediction.strongestPick
+      prediction.strongestPick,
   );
 
   const wins = completed.filter(
-    (prediction) => prediction.strongestPick === prediction.actualResult
+    (prediction) => prediction.strongestPick === prediction.actualResult,
   ).length;
 
   const losses = completed.length - wins;
@@ -330,6 +331,116 @@ function getStrongestAccuracyStats(predictions: SavedPrediction[]): AccuracyStat
   };
 }
 
+function getSecondChoiceAccuracyStats(
+  predictions: SavedPrediction[],
+): AccuracyStats {
+  const completed = predictions.filter(
+    (prediction) =>
+      prediction.status === "RESULTED" &&
+      prediction.actualResult &&
+      prediction.secondChoiceResult,
+  );
+
+  const wins = completed.filter(
+    (prediction) => prediction.secondChoiceResult === "WON",
+  ).length;
+
+  const losses = completed.filter(
+    (prediction) => prediction.secondChoiceResult === "LOST",
+  ).length;
+
+  return {
+    completed: completed.length,
+    wins,
+    losses,
+    accuracy: getAccuracy(wins, completed.length),
+  };
+}
+
+function getPredictionTypeAccuracyStats(
+  predictions: SavedPrediction[],
+  outcome: Outcome,
+): AccuracyStats {
+  const completed = predictions.filter(
+    (prediction) =>
+      prediction.status === "RESULTED" &&
+      prediction.actualResult &&
+      prediction.firstChoice === outcome,
+  );
+
+  const wins = completed.filter(
+    (prediction) => prediction.actualResult === outcome,
+  ).length;
+
+  const losses = completed.length - wins;
+
+  return {
+    completed: completed.length,
+    wins,
+    losses,
+    accuracy: getAccuracy(wins, completed.length),
+  };
+}
+
+function getConfidenceLevel(prediction: SavedPrediction) {
+  const percent = prediction.strongestPercent || 0;
+
+  if (percent >= 65) return "High confidence";
+  if (percent >= 50) return "Medium confidence";
+  return "Low confidence";
+}
+
+function getConfidenceAccuracyStats(
+  predictions: SavedPrediction[],
+  confidenceLevel: "High confidence" | "Medium confidence" | "Low confidence",
+): AccuracyStats {
+  const completed = predictions.filter(
+    (prediction) =>
+      prediction.status === "RESULTED" &&
+      prediction.actualResult &&
+      prediction.firstChoiceResult &&
+      getConfidenceLevel(prediction) === confidenceLevel,
+  );
+
+  const wins = completed.filter(
+    (prediction) => prediction.firstChoiceResult === "WON",
+  ).length;
+
+  const losses = completed.filter(
+    (prediction) => prediction.firstChoiceResult === "LOST",
+  ).length;
+
+  return {
+    completed: completed.length,
+    wins,
+    losses,
+    accuracy: getAccuracy(wins, completed.length),
+  };
+}
+
+function filterPredictionsByResult(
+  predictions: SavedPrediction[],
+  filter: ResultFilter,
+) {
+  if (filter === "pending") {
+    return predictions.filter((prediction) => prediction.status === "PENDING");
+  }
+
+  if (filter === "won") {
+    return predictions.filter(
+      (prediction) => prediction.firstChoiceResult === "WON",
+    );
+  }
+
+  if (filter === "lost") {
+    return predictions.filter(
+      (prediction) => prediction.firstChoiceResult === "LOST",
+    );
+  }
+
+  return predictions;
+}
+
 function getActualResultFromGoals(homeGoals: number, awayGoals: number): Outcome {
   if (homeGoals > awayGoals) return "HOME";
   if (awayGoals > homeGoals) return "AWAY";
@@ -339,7 +450,7 @@ function getActualResultFromGoals(homeGoals: number, awayGoals: number): Outcome
 function normalisePrediction(
   raw: RawPrediction,
   index: number,
-  leagueId: number
+  leagueId: number,
 ): AdminPrediction {
   const prediction = readObject(raw.prediction);
   const probabilities = readObject(prediction.probabilities);
@@ -394,9 +505,7 @@ function normalisePrediction(
   const choices = getTopChoices(homePercent, drawPercent, awayPercent);
 
   const rawFixtureId =
-    readNumber(raw.fixtureId) ||
-    readNumber(raw.fixture_id) ||
-    readNumber(raw.id);
+    readNumber(raw.fixtureId) || readNumber(raw.fixture_id) || readNumber(raw.id);
 
   return {
     id: String(raw.fixtureId || raw.fixture_id || raw.id || index),
@@ -424,9 +533,7 @@ function normalisePrediction(
     firstChoice: choices.firstChoice,
     secondChoice: choices.secondChoice,
     confidence:
-      readString(prediction.confidence) ||
-      readString(raw.confidence) ||
-      "N/A",
+      readString(prediction.confidence) || readString(raw.confidence) || "N/A",
     advice:
       readString(prediction.advice) ||
       readString(prediction.summary) ||
@@ -447,7 +554,7 @@ function normalisePrediction(
 async function getPredictions(leagueId: string) {
   try {
     const url = `${PROFBINT_PREDICTIONS_URL}?league=${encodeURIComponent(
-      leagueId
+      leagueId,
     )}`;
 
     const response = await fetch(url, {
@@ -476,7 +583,7 @@ async function getPredictions(leagueId: string) {
 
     return {
       predictions: rawPredictions.map((prediction, index) =>
-        normalisePrediction(prediction, index, Number(leagueId))
+        normalisePrediction(prediction, index, Number(leagueId)),
       ),
       error: "",
     };
@@ -509,7 +616,7 @@ async function getFinishedFixtureResult(fixtureId: number) {
           "x-rapidapi-key": apiKey,
           "x-rapidapi-host": apiHost,
         },
-      }
+      },
     );
 
     if (!response.ok) {
@@ -625,7 +732,7 @@ async function saveLeagueSnapshot(formData: FormData) {
     const strongestPercent = Math.max(
       prediction.homePercent,
       prediction.drawPercent,
-      prediction.awayPercent
+      prediction.awayPercent,
     );
 
     const kickoffDate = parseKickoffDate(prediction.kickoffIso);
@@ -692,7 +799,7 @@ async function saveLeagueSnapshot(formData: FormData) {
       season,
       sort,
       saved: "true",
-    })
+    }),
   );
 }
 
@@ -722,7 +829,7 @@ async function syncFinishedResults(formData: FormData) {
         synced: 0,
         skipped: 0,
         failed: 0,
-      })
+      }),
     );
   }
 
@@ -790,7 +897,7 @@ async function syncFinishedResults(formData: FormData) {
       synced,
       skipped,
       failed,
-    })
+    }),
   );
 }
 
@@ -846,7 +953,7 @@ async function updateResult(formData: FormData) {
       season,
       sort,
       result: "updated",
-    })
+    }),
   );
 }
 
@@ -887,7 +994,7 @@ async function resetResult(formData: FormData) {
       season,
       sort,
       result: "reset",
-    })
+    }),
   );
 }
 
@@ -1016,20 +1123,62 @@ export default async function Home({
     (prediction) =>
       prediction.status === "RESULTED" &&
       prediction.actualResult &&
-      prediction.firstChoiceResult
+      prediction.firstChoiceResult,
   );
 
   const pendingSeasonPredictions = seasonPredictions.filter(
-    (prediction) => prediction.status === "PENDING"
+    (prediction) => prediction.status === "PENDING",
   );
 
   const selectedLeagueCompleted = completedSeasonPredictions.filter(
-    (prediction) => prediction.leagueId === Number(selectedLeague.id)
+    (prediction) => prediction.leagueId === Number(selectedLeague.id),
   );
 
-  const overallStats = getAccuracyStats(seasonPredictions);
-  const selectedLeagueStats = getAccuracyStats(selectedLeagueCompleted);
-  const strongestStats = getStrongestAccuracyStats(seasonPredictions);
+  const analyticsPredictions = filterPredictionsByResult(
+    seasonPredictions,
+    selectedFilter,
+  );
+
+  const completedAnalyticsPredictions = analyticsPredictions.filter(
+    (prediction) =>
+      prediction.status === "RESULTED" &&
+      prediction.actualResult &&
+      prediction.firstChoiceResult,
+  );
+
+  const overallStats = getAccuracyStats(analyticsPredictions);
+  const selectedLeagueStats = getAccuracyStats(
+    filterPredictionsByResult(selectedLeagueCompleted, selectedFilter),
+  );
+  const strongestStats = getStrongestAccuracyStats(analyticsPredictions);
+  const firstChoiceStats = getAccuracyStats(analyticsPredictions);
+  const secondChoiceStats = getSecondChoiceAccuracyStats(analyticsPredictions);
+
+  const homePredictionStats = getPredictionTypeAccuracyStats(
+    analyticsPredictions,
+    "HOME",
+  );
+  const drawPredictionStats = getPredictionTypeAccuracyStats(
+    analyticsPredictions,
+    "DRAW",
+  );
+  const awayPredictionStats = getPredictionTypeAccuracyStats(
+    analyticsPredictions,
+    "AWAY",
+  );
+
+  const highConfidenceStats = getConfidenceAccuracyStats(
+    analyticsPredictions,
+    "High confidence",
+  );
+  const mediumConfidenceStats = getConfidenceAccuracyStats(
+    analyticsPredictions,
+    "Medium confidence",
+  );
+  const lowConfidenceStats = getConfidenceAccuracyStats(
+    analyticsPredictions,
+    "Low confidence",
+  );
 
   const todayRange = getTodayRange();
 
@@ -1039,16 +1188,23 @@ export default async function Home({
   });
 
   const todayWins = todayCompleted.filter(
-    (prediction) => prediction.firstChoiceResult === "WON"
+    (prediction) => prediction.firstChoiceResult === "WON",
   ).length;
 
   const todayLosses = todayCompleted.filter(
-    (prediction) => prediction.firstChoiceResult === "LOST"
+    (prediction) => prediction.firstChoiceResult === "LOST",
+  ).length;
+
+  const todayStrongestWins = todayCompleted.filter(
+    (prediction) => prediction.strongestPick === prediction.actualResult,
   ).length;
 
   const leagueBreakdown = LEAGUES.map((league) => {
-    const leaguePredictions = seasonPredictions.filter(
-      (prediction) => prediction.leagueId === Number(league.id)
+    const leaguePredictions = filterPredictionsByResult(
+      seasonPredictions.filter(
+        (prediction) => prediction.leagueId === Number(league.id),
+      ),
+      selectedFilter,
     );
 
     return {
@@ -1056,9 +1212,21 @@ export default async function Home({
       stats: getAccuracyStats(leaguePredictions),
       tracked: leaguePredictions.length,
       pending: leaguePredictions.filter(
-        (prediction) => prediction.status === "PENDING"
+        (prediction) => prediction.status === "PENDING",
       ).length,
     };
+  });
+
+  const leagueRanking = [...leagueBreakdown].sort((a, b) => {
+    const aAccuracy = a.stats.completed
+      ? Math.round((a.stats.wins / a.stats.completed) * 100)
+      : -1;
+    const bAccuracy = b.stats.completed
+      ? Math.round((b.stats.wins / b.stats.completed) * 100)
+      : -1;
+
+    if (bAccuracy !== aAccuracy) return bAccuracy - aAccuracy;
+    return b.stats.completed - a.stats.completed;
   });
 
   const strongestPick = [...predictions].sort((a, b) => {
@@ -1258,6 +1426,159 @@ export default async function Home({
           />
         </section>
 
+        <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
+          <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
+                Advanced analytics intelligence
+              </p>
+
+              <h2 className="mt-2 text-2xl font-black">
+                {getSeasonLabel(selectedSeason)} ·{" "}
+                {selectedFilter.toUpperCase()} sample
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-400">
+                Server-side calculations from PredictionHistory. No graphs yet;
+                this keeps the data ready for future results dashboards.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm font-bold text-slate-300">
+              {completedAnalyticsPredictions.length} settled in current view
+            </div>
+          </div>
+
+          <div className="mt-5 grid gap-4 md:grid-cols-3">
+            <IntelligenceCard
+              title="Strongest pick win rate"
+              value={strongestStats.accuracy}
+              total={strongestStats.completed}
+              wins={strongestStats.wins}
+              losses={strongestStats.losses}
+              note="Based on strongestPick vs actualResult"
+            />
+
+            <IntelligenceCard
+              title="First choice accuracy"
+              value={firstChoiceStats.accuracy}
+              total={firstChoiceStats.completed}
+              wins={firstChoiceStats.wins}
+              losses={firstChoiceStats.losses}
+              note="Main model pick performance"
+            />
+
+            <IntelligenceCard
+              title="Second choice accuracy"
+              value={secondChoiceStats.accuracy}
+              total={secondChoiceStats.completed}
+              wins={secondChoiceStats.wins}
+              losses={secondChoiceStats.losses}
+              note="Backup model pick performance"
+            />
+          </div>
+
+          <div className="mt-5 grid gap-4 lg:grid-cols-3">
+            <AnalyticsPanel title="Prediction-type accuracy">
+              <AnalyticsRow
+                label="HOME predictions"
+                value={homePredictionStats.accuracy}
+                detail={`${homePredictionStats.wins} won · ${homePredictionStats.losses} lost · ${homePredictionStats.completed} total`}
+              />
+              <AnalyticsRow
+                label="DRAW predictions"
+                value={drawPredictionStats.accuracy}
+                detail={`${drawPredictionStats.wins} won · ${drawPredictionStats.losses} lost · ${drawPredictionStats.completed} total`}
+              />
+              <AnalyticsRow
+                label="AWAY predictions"
+                value={awayPredictionStats.accuracy}
+                detail={`${awayPredictionStats.wins} won · ${awayPredictionStats.losses} lost · ${awayPredictionStats.completed} total`}
+              />
+            </AnalyticsPanel>
+
+            <AnalyticsPanel title="Confidence-level tracking">
+              <AnalyticsRow
+                label="High confidence"
+                value={highConfidenceStats.accuracy}
+                detail={`${highConfidenceStats.wins} won · ${highConfidenceStats.losses} lost · ${highConfidenceStats.completed} total`}
+              />
+              <AnalyticsRow
+                label="Medium confidence"
+                value={mediumConfidenceStats.accuracy}
+                detail={`${mediumConfidenceStats.wins} won · ${mediumConfidenceStats.losses} lost · ${mediumConfidenceStats.completed} total`}
+              />
+              <AnalyticsRow
+                label="Low confidence"
+                value={lowConfidenceStats.accuracy}
+                detail={`${lowConfidenceStats.wins} won · ${lowConfidenceStats.losses} lost · ${lowConfidenceStats.completed} total`}
+              />
+            </AnalyticsPanel>
+
+            <AnalyticsPanel title="Daily performance">
+              <AnalyticsRow
+                label="Today's wins"
+                value={String(todayWins)}
+                detail="First-choice wins updated today"
+              />
+              <AnalyticsRow
+                label="Today's losses"
+                value={String(todayLosses)}
+                detail="First-choice losses updated today"
+              />
+              <AnalyticsRow
+                label="Today's strongest wins"
+                value={String(todayStrongestWins)}
+                detail={`${todayCompleted.length} settled today`}
+              />
+            </AnalyticsPanel>
+          </div>
+        </section>
+
+        <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
+          <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
+                League ranking table
+              </p>
+
+              <h2 className="mt-2 text-2xl font-black">
+                Accuracy ranked highest first
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-400">
+                Sorted by accuracy, then by settled prediction volume. Uses the
+                selected season and current result filter.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 overflow-hidden rounded-2xl border border-slate-800">
+            <div className="hidden grid-cols-[1.3fr_1fr_1fr_1fr_1fr] border-b border-slate-800 bg-slate-950 px-4 py-3 text-xs font-black uppercase tracking-[0.18em] text-slate-500 md:grid">
+              <span>League</span>
+              <span>Settled</span>
+              <span>Wins</span>
+              <span>Losses</span>
+              <span>Accuracy</span>
+            </div>
+
+            <div className="divide-y divide-slate-800">
+              {leagueRanking.map((league, index) => (
+                <LeagueRankingRow
+                  key={league.id}
+                  rank={index + 1}
+                  league={league.shortName}
+                  settled={league.stats.completed}
+                  wins={league.stats.wins}
+                  losses={league.stats.losses}
+                  accuracy={league.stats.accuracy}
+                  active={league.id === selectedLeague.id}
+                />
+              ))}
+            </div>
+          </div>
+        </section>
+
         <section className="mt-6 rounded-[2rem] border border-amber-500/30 bg-amber-500/10 p-4 shadow-xl md:p-5">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
@@ -1270,10 +1591,10 @@ export default async function Home({
               </h2>
 
               <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-300">
-                Checks pending {getSeasonLabel(selectedSeason)} predictions
-                with stored fixture IDs against API-Football. Finished matches
-                are updated automatically; unfinished or missing fixtures are
-                skipped safely.
+                Checks pending {getSeasonLabel(selectedSeason)} predictions with
+                stored fixture IDs against API-Football. Finished matches are
+                updated automatically; unfinished or missing fixtures are skipped
+                safely.
               </p>
             </div>
 
@@ -1696,7 +2017,7 @@ function SavedPredictionRow({
             <MiniResultBox
               title="First choice"
               value={`${getOutcomeShortLabel(
-                prediction.firstChoice
+                prediction.firstChoice,
               )} · ${getOutcomeLabel(prediction.firstChoice)}`}
               status={getStatusLabel(prediction.firstChoiceResult)}
             />
@@ -1704,7 +2025,7 @@ function SavedPredictionRow({
             <MiniResultBox
               title="Second choice"
               value={`${getOutcomeShortLabel(
-                prediction.secondChoice
+                prediction.secondChoice,
               )} · ${getOutcomeLabel(prediction.secondChoice)}`}
               status={getStatusLabel(prediction.secondChoiceResult)}
             />
@@ -1712,7 +2033,7 @@ function SavedPredictionRow({
             <MiniResultBox
               title="Actual result"
               value={`${getOutcomeShortLabel(
-                prediction.actualResult
+                prediction.actualResult,
               )} · ${getOutcomeLabel(prediction.actualResult)}`}
               status={prediction.actualResult ? "RESULTED" : "PENDING"}
             />
@@ -1720,7 +2041,7 @@ function SavedPredictionRow({
             <MiniResultBox
               title="Strongest pick"
               value={`${getOutcomeShortLabel(
-                prediction.strongestPick
+                prediction.strongestPick,
               )} · ${getOutcomeLabel(prediction.strongestPick)}${
                 prediction.strongestPercent
                   ? ` · ${prediction.strongestPercent}%`
@@ -1804,6 +2125,133 @@ function MiniResultBox({
       >
         {status}
       </span>
+    </div>
+  );
+}
+
+function IntelligenceCard({
+  title,
+  value,
+  total,
+  wins,
+  losses,
+  note,
+}: {
+  title: string;
+  value: string;
+  total: number;
+  wins: number;
+  losses: number;
+  note: string;
+}) {
+  return (
+    <div className="rounded-3xl border border-slate-800 bg-slate-950 p-5">
+      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">
+        {title}
+      </p>
+      <p className="mt-3 text-4xl font-black text-white">{value}</p>
+      <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900 p-3">
+          <p className="text-lg font-black text-white">{total}</p>
+          <p className="text-xs font-bold text-slate-500">Total</p>
+        </div>
+        <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3">
+          <p className="text-lg font-black text-emerald-300">{wins}</p>
+          <p className="text-xs font-bold text-emerald-400/80">Won</p>
+        </div>
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-3">
+          <p className="text-lg font-black text-red-300">{losses}</p>
+          <p className="text-xs font-bold text-red-400/80">Lost</p>
+        </div>
+      </div>
+      <p className="mt-3 text-sm leading-5 text-slate-400">{note}</p>
+    </div>
+  );
+}
+
+function AnalyticsPanel({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-3xl border border-slate-800 bg-slate-950 p-4">
+      <p className="text-sm font-black uppercase tracking-[0.18em] text-slate-500">
+        {title}
+      </p>
+      <div className="mt-4 space-y-3">{children}</div>
+    </div>
+  );
+}
+
+function AnalyticsRow({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <p className="font-black text-white">{label}</p>
+          <p className="mt-1 text-sm text-slate-400">{detail}</p>
+        </div>
+        <p className="text-2xl font-black text-amber-300">{value}</p>
+      </div>
+    </div>
+  );
+}
+
+function LeagueRankingRow({
+  rank,
+  league,
+  settled,
+  wins,
+  losses,
+  accuracy,
+  active,
+}: {
+  rank: number;
+  league: string;
+  settled: number;
+  wins: number;
+  losses: number;
+  accuracy: string;
+  active: boolean;
+}) {
+  return (
+    <div
+      className={`grid gap-3 px-4 py-4 text-sm md:grid-cols-[1.3fr_1fr_1fr_1fr_1fr] md:items-center ${
+        active ? "bg-amber-500/10" : "bg-slate-950"
+      }`}
+    >
+      <div className="flex items-center gap-3">
+        <span
+          className={`flex h-8 w-8 items-center justify-center rounded-xl text-xs font-black ${
+            active ? "bg-amber-400 text-slate-950" : "bg-slate-800 text-white"
+          }`}
+        >
+          {rank}
+        </span>
+        <div>
+          <p className="font-black text-white">{league}</p>
+          <p className="text-xs text-slate-500 md:hidden">
+            {wins}W · {losses}L · {settled} settled
+          </p>
+        </div>
+      </div>
+      <p className="hidden font-bold text-slate-300 md:block">{settled}</p>
+      <p className="hidden font-bold text-emerald-300 md:block">{wins}</p>
+      <p className="hidden font-bold text-red-300 md:block">{losses}</p>
+      <p className="text-2xl font-black text-white md:text-base md:text-amber-300">
+        {accuracy}
+      </p>
     </div>
   );
 }
