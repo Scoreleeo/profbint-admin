@@ -69,7 +69,22 @@ type AccuracyStats = {
   accuracy: string;
 };
 
+type ApiFootballFixtureResponse = {
+  response?: Array<{
+    fixture?: {
+      status?: {
+        short?: string | null;
+      };
+    };
+    goals?: {
+      home?: number | null;
+      away?: number | null;
+    };
+  }>;
+};
+
 const PROFBINT_PREDICTIONS_URL = "https://profbint.com/api/predictions";
+const FINISHED_STATUS_CODES = ["FT", "AET", "PEN"];
 
 const LEAGUES: LeagueOption[] = [
   { id: "39", name: "Premier League", shortName: "Premier League" },
@@ -152,6 +167,10 @@ function buildHref({
   sort,
   result,
   saved,
+  sync,
+  synced,
+  skipped,
+  failed,
 }: {
   leagueId: string;
   filter: ResultFilter;
@@ -159,6 +178,10 @@ function buildHref({
   sort: SortOrder;
   result?: string;
   saved?: string;
+  sync?: string;
+  synced?: number;
+  skipped?: number;
+  failed?: number;
 }) {
   const params = new URLSearchParams();
 
@@ -169,6 +192,10 @@ function buildHref({
 
   if (result) params.set("result", result);
   if (saved) params.set("saved", saved);
+  if (sync) params.set("sync", sync);
+  if (typeof synced === "number") params.set("synced", String(synced));
+  if (typeof skipped === "number") params.set("skipped", String(skipped));
+  if (typeof failed === "number") params.set("failed", String(failed));
 
   return `/?${params.toString()}`;
 }
@@ -301,6 +328,12 @@ function getStrongestAccuracyStats(predictions: SavedPrediction[]): AccuracyStat
     losses,
     accuracy: getAccuracy(wins, completed.length),
   };
+}
+
+function getActualResultFromGoals(homeGoals: number, awayGoals: number): Outcome {
+  if (homeGoals > awayGoals) return "HOME";
+  if (awayGoals > homeGoals) return "AWAY";
+  return "DRAW";
 }
 
 function normalisePrediction(
@@ -455,6 +488,83 @@ async function getPredictions(leagueId: string) {
   }
 }
 
+async function getFinishedFixtureResult(fixtureId: number) {
+  const apiKey = process.env.API_FOOTBALL_KEY;
+  const apiHost = process.env.API_FOOTBALL_HOST || "v3.football.api-sports.io";
+
+  if (!apiKey) {
+    return {
+      ok: false,
+      reason: "missing-api-key",
+      actualResult: null as Outcome | null,
+    };
+  }
+
+  try {
+    const response = await fetch(
+      `https://${apiHost}/fixtures?id=${encodeURIComponent(String(fixtureId))}`,
+      {
+        cache: "no-store",
+        headers: {
+          "x-rapidapi-key": apiKey,
+          "x-rapidapi-host": apiHost,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        reason: `api-${response.status}`,
+        actualResult: null as Outcome | null,
+      };
+    }
+
+    const data = (await response.json()) as ApiFootballFixtureResponse;
+    const fixture = data.response?.[0];
+
+    if (!fixture) {
+      return {
+        ok: true,
+        reason: "missing-fixture",
+        actualResult: null as Outcome | null,
+      };
+    }
+
+    const statusShort = fixture.fixture?.status?.short || "";
+    const homeGoals = fixture.goals?.home;
+    const awayGoals = fixture.goals?.away;
+
+    if (!FINISHED_STATUS_CODES.includes(statusShort)) {
+      return {
+        ok: true,
+        reason: "unfinished",
+        actualResult: null as Outcome | null,
+      };
+    }
+
+    if (typeof homeGoals !== "number" || typeof awayGoals !== "number") {
+      return {
+        ok: true,
+        reason: "missing-score",
+        actualResult: null as Outcome | null,
+      };
+    }
+
+    return {
+      ok: true,
+      reason: "finished",
+      actualResult: getActualResultFromGoals(homeGoals, awayGoals),
+    };
+  } catch {
+    return {
+      ok: false,
+      reason: "api-error",
+      actualResult: null as Outcome | null,
+    };
+  }
+}
+
 async function login(formData: FormData) {
   "use server";
 
@@ -586,6 +696,104 @@ async function saveLeagueSnapshot(formData: FormData) {
   );
 }
 
+async function syncFinishedResults(formData: FormData) {
+  "use server";
+
+  const cookieStore = await cookies();
+  const isLoggedIn = cookieStore.get("profbint_admin")?.value === "true";
+
+  if (!isLoggedIn) {
+    redirect("/");
+  }
+
+  const leagueId = String(formData.get("leagueId") || "39");
+  const filter = normaliseFilter(String(formData.get("filter") || "all"));
+  const season = normaliseSeason(String(formData.get("season") || "2025-26"));
+  const sort = normaliseSort(String(formData.get("sort") || "newest"));
+
+  if (!process.env.API_FOOTBALL_KEY) {
+    redirect(
+      buildHref({
+        leagueId,
+        filter,
+        season,
+        sort,
+        sync: "missing-key",
+        synced: 0,
+        skipped: 0,
+        failed: 0,
+      })
+    );
+  }
+
+  const pendingPredictions = await prisma.predictionHistory.findMany({
+    where: {
+      season,
+      status: "PENDING",
+    },
+    orderBy: {
+      kickoff: "asc",
+    },
+    take: 25,
+  });
+
+  let synced = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const prediction of pendingPredictions) {
+    if (!prediction.fixtureId) {
+      skipped += 1;
+      continue;
+    }
+
+    const result = await getFinishedFixtureResult(prediction.fixtureId);
+
+    if (!result.ok) {
+      failed += 1;
+      continue;
+    }
+
+    if (!result.actualResult) {
+      skipped += 1;
+      continue;
+    }
+
+    const firstChoiceResult =
+      prediction.firstChoice === result.actualResult ? "WON" : "LOST";
+
+    const secondChoiceResult =
+      prediction.secondChoice === result.actualResult ? "WON" : "LOST";
+
+    await prisma.predictionHistory.update({
+      where: {
+        id: prediction.id,
+      },
+      data: {
+        actualResult: result.actualResult,
+        firstChoiceResult,
+        secondChoiceResult,
+        status: "RESULTED",
+      },
+    });
+
+    synced += 1;
+  }
+
+  redirect(
+    buildHref({
+      leagueId,
+      filter,
+      season,
+      sort,
+      sync: failed > 0 ? "partial" : "success",
+      synced,
+      skipped,
+      failed,
+    })
+  );
+}
+
 async function updateResult(formData: FormData) {
   "use server";
 
@@ -694,6 +902,10 @@ export default async function Home({
     sort?: string;
     saved?: string;
     result?: string;
+    sync?: string;
+    synced?: string;
+    skipped?: string;
+    failed?: string;
   }>;
 }) {
   const cookieStore = await cookies();
@@ -870,9 +1082,8 @@ export default async function Home({
               </h1>
 
               <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
-                Track saved predictions, update match results, filter by season,
-                and prepare clean result data for future public graphs and
-                verified performance reporting.
+                Track saved predictions, update match results, sync finished
+                fixtures, and prepare clean result data for future graphs.
               </p>
             </div>
 
@@ -949,8 +1160,8 @@ export default async function Home({
               </h2>
 
               <p className="mt-1 text-sm text-slate-400">
-                Filters are stored in the URL so each view can be refreshed,
-                shared, and safely returned to after result updates.
+                Filters are stored in the URL so each view can be refreshed and
+                safely returned to after updates.
               </p>
             </div>
 
@@ -1045,6 +1256,63 @@ export default async function Home({
             value={String(pendingSeasonPredictions.length)}
             detail="awaiting actual result"
           />
+        </section>
+
+        <section className="mt-6 rounded-[2rem] border border-amber-500/30 bg-amber-500/10 p-4 shadow-xl md:p-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
+                Manual result sync
+              </p>
+
+              <h2 className="mt-2 text-2xl font-black text-white">
+                Sync finished results
+              </h2>
+
+              <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-300">
+                Checks pending {getSeasonLabel(selectedSeason)} predictions
+                with stored fixture IDs against API-Football. Finished matches
+                are updated automatically; unfinished or missing fixtures are
+                skipped safely.
+              </p>
+            </div>
+
+            <form action={syncFinishedResults}>
+              <input type="hidden" name="leagueId" value={selectedLeague.id} />
+              <input type="hidden" name="filter" value={selectedFilter} />
+              <input type="hidden" name="season" value={selectedSeason} />
+              <input type="hidden" name="sort" value={selectedSort} />
+
+              <button
+                type="submit"
+                className="rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-slate-950 hover:bg-amber-300"
+              >
+                Sync Finished Results
+              </button>
+            </form>
+          </div>
+
+          {params?.sync === "success" ? (
+            <div className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-bold text-emerald-300">
+              Result sync complete. Updated {params.synced || "0"} finished
+              matches. Skipped {params.skipped || "0"}. Failed{" "}
+              {params.failed || "0"}.
+            </div>
+          ) : null}
+
+          {params?.sync === "partial" ? (
+            <div className="mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm font-bold text-amber-300">
+              Result sync partially completed. Updated {params.synced || "0"}.
+              Skipped {params.skipped || "0"}. Failed {params.failed || "0"}.
+            </div>
+          ) : null}
+
+          {params?.sync === "missing-key" ? (
+            <div className="mt-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-bold text-red-300">
+              Missing API_FOOTBALL_KEY in environment variables. Add it in
+              Vercel before syncing.
+            </div>
+          ) : null}
         </section>
 
         <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
