@@ -75,17 +75,55 @@ type ApiFootballFixtureResponse = {
     fixture?: {
       status?: {
         short?: string | null;
+        long?: string | null;
       };
     };
     goals?: {
       home?: number | null;
       away?: number | null;
     };
+    score?: {
+      halftime?: {
+        home?: number | null;
+        away?: number | null;
+      };
+      fulltime?: {
+        home?: number | null;
+        away?: number | null;
+      };
+      extratime?: {
+        home?: number | null;
+        away?: number | null;
+      };
+      penalty?: {
+        home?: number | null;
+        away?: number | null;
+      };
+    };
   }>;
 };
 
+type FinishedFixtureResult = {
+  ok: boolean;
+  reason:
+    | "finished"
+    | "missing-api-key"
+    | "missing-fixture"
+    | "unfinished"
+    | "missing-score"
+    | "api-error"
+    | `api-${number}`;
+  actualResult: Outcome | null;
+  statusShort?: string;
+  statusLong?: string;
+  scoreSource?: string;
+  homeScore?: number;
+  awayScore?: number;
+};
+
 const PROFBINT_PREDICTIONS_URL = "https://profbint.com/api/predictions";
-const FINISHED_STATUS_CODES = ["FT", "AET", "PEN"];
+
+const FINISHED_STATUS_CODES = ["FT", "AET", "PEN", "AWD", "WO"];
 
 const LEAGUES: LeagueOption[] = [
   { id: "39", name: "Premier League", shortName: "Premier League" },
@@ -169,9 +207,14 @@ function buildHref({
   result,
   saved,
   sync,
+  checked,
   synced,
   skipped,
+  missingFixtureId,
+  unfinished,
+  noApiMatch,
   failed,
+  debug,
 }: {
   leagueId: string;
   filter: ResultFilter;
@@ -180,9 +223,14 @@ function buildHref({
   result?: string;
   saved?: string;
   sync?: string;
+  checked?: number;
   synced?: number;
   skipped?: number;
+  missingFixtureId?: number;
+  unfinished?: number;
+  noApiMatch?: number;
   failed?: number;
+  debug?: string;
 }) {
   const params = new URLSearchParams();
 
@@ -194,9 +242,16 @@ function buildHref({
   if (result) params.set("result", result);
   if (saved) params.set("saved", saved);
   if (sync) params.set("sync", sync);
+  if (typeof checked === "number") params.set("checked", String(checked));
   if (typeof synced === "number") params.set("synced", String(synced));
   if (typeof skipped === "number") params.set("skipped", String(skipped));
+  if (typeof missingFixtureId === "number") {
+    params.set("missingFixtureId", String(missingFixtureId));
+  }
+  if (typeof unfinished === "number") params.set("unfinished", String(unfinished));
+  if (typeof noApiMatch === "number") params.set("noApiMatch", String(noApiMatch));
   if (typeof failed === "number") params.set("failed", String(failed));
+  if (debug) params.set("debug", debug);
 
   return `/?${params.toString()}`;
 }
@@ -447,6 +502,51 @@ function getActualResultFromGoals(homeGoals: number, awayGoals: number): Outcome
   return "DRAW";
 }
 
+function readScorePair(
+  home: number | null | undefined,
+  away: number | null | undefined,
+) {
+  if (typeof home === "number" && typeof away === "number") {
+    return { home, away };
+  }
+
+  return null;
+}
+
+function getBestFinishedScore(
+  fixture: NonNullable<ApiFootballFixtureResponse["response"]>[number],
+  statusShort: string,
+) {
+  const goalsScore = readScorePair(fixture.goals?.home, fixture.goals?.away);
+  const fulltimeScore = readScorePair(
+    fixture.score?.fulltime?.home,
+    fixture.score?.fulltime?.away,
+  );
+  const extratimeScore = readScorePair(
+    fixture.score?.extratime?.home,
+    fixture.score?.extratime?.away,
+  );
+  const penaltyScore = readScorePair(
+    fixture.score?.penalty?.home,
+    fixture.score?.penalty?.away,
+  );
+
+  if (statusShort === "PEN") {
+    if (fulltimeScore) return { ...fulltimeScore, source: "score.fulltime" };
+    if (goalsScore) return { ...goalsScore, source: "goals" };
+    if (extratimeScore) return { ...extratimeScore, source: "score.extratime" };
+    if (penaltyScore) return { ...penaltyScore, source: "score.penalty" };
+    return null;
+  }
+
+  if (goalsScore) return { ...goalsScore, source: "goals" };
+  if (fulltimeScore) return { ...fulltimeScore, source: "score.fulltime" };
+  if (extratimeScore) return { ...extratimeScore, source: "score.extratime" };
+  if (penaltyScore) return { ...penaltyScore, source: "score.penalty" };
+
+  return null;
+}
+
 function normalisePrediction(
   raw: RawPrediction,
   index: number,
@@ -595,7 +695,9 @@ async function getPredictions(leagueId: string) {
   }
 }
 
-async function getFinishedFixtureResult(fixtureId: number) {
+async function getFinishedFixtureResult(
+  fixtureId: number,
+): Promise<FinishedFixtureResult> {
   const apiKey = process.env.API_FOOTBALL_KEY;
   const apiHost = process.env.API_FOOTBALL_HOST || "v3.football.api-sports.io";
 
@@ -603,7 +705,7 @@ async function getFinishedFixtureResult(fixtureId: number) {
     return {
       ok: false,
       reason: "missing-api-key",
-      actualResult: null as Outcome | null,
+      actualResult: null,
     };
   }
 
@@ -623,7 +725,7 @@ async function getFinishedFixtureResult(fixtureId: number) {
       return {
         ok: false,
         reason: `api-${response.status}`,
-        actualResult: null as Outcome | null,
+        actualResult: null,
       };
     }
 
@@ -634,40 +736,50 @@ async function getFinishedFixtureResult(fixtureId: number) {
       return {
         ok: true,
         reason: "missing-fixture",
-        actualResult: null as Outcome | null,
+        actualResult: null,
       };
     }
 
     const statusShort = fixture.fixture?.status?.short || "";
-    const homeGoals = fixture.goals?.home;
-    const awayGoals = fixture.goals?.away;
+    const statusLong = fixture.fixture?.status?.long || "";
 
     if (!FINISHED_STATUS_CODES.includes(statusShort)) {
       return {
         ok: true,
         reason: "unfinished",
-        actualResult: null as Outcome | null,
+        actualResult: null,
+        statusShort,
+        statusLong,
       };
     }
 
-    if (typeof homeGoals !== "number" || typeof awayGoals !== "number") {
+    const score = getBestFinishedScore(fixture, statusShort);
+
+    if (!score) {
       return {
         ok: true,
         reason: "missing-score",
-        actualResult: null as Outcome | null,
+        actualResult: null,
+        statusShort,
+        statusLong,
       };
     }
 
     return {
       ok: true,
       reason: "finished",
-      actualResult: getActualResultFromGoals(homeGoals, awayGoals),
+      actualResult: getActualResultFromGoals(score.home, score.away),
+      statusShort,
+      statusLong,
+      scoreSource: score.source,
+      homeScore: score.home,
+      awayScore: score.away,
     };
   } catch {
     return {
       ok: false,
       reason: "api-error",
-      actualResult: null as Outcome | null,
+      actualResult: null,
     };
   }
 }
@@ -826,8 +938,12 @@ async function syncFinishedResults(formData: FormData) {
         season,
         sort,
         sync: "missing-key",
+        checked: 0,
         synced: 0,
         skipped: 0,
+        missingFixtureId: 0,
+        unfinished: 0,
+        noApiMatch: 0,
         failed: 0,
       }),
     );
@@ -841,16 +957,31 @@ async function syncFinishedResults(formData: FormData) {
     orderBy: {
       kickoff: "asc",
     },
-    take: 25,
+    take: 35,
   });
 
+  let checked = 0;
   let synced = 0;
   let skipped = 0;
+  let missingFixtureId = 0;
+  let unfinished = 0;
+  let noApiMatch = 0;
   let failed = 0;
 
+  const debugLines: string[] = [];
+
   for (const prediction of pendingPredictions) {
+    checked += 1;
+    const matchLabel = `${prediction.homeTeam} vs ${prediction.awayTeam}`;
+
     if (!prediction.fixtureId) {
       skipped += 1;
+      missingFixtureId += 1;
+
+      if (debugLines.length < 10) {
+        debugLines.push(`${matchLabel}: skipped - missing fixtureId`);
+      }
+
       continue;
     }
 
@@ -858,11 +989,31 @@ async function syncFinishedResults(formData: FormData) {
 
     if (!result.ok) {
       failed += 1;
+
+      if (debugLines.length < 10) {
+        debugLines.push(
+          `${matchLabel}: failed - ${result.reason} for fixture ${prediction.fixtureId}`,
+        );
+      }
+
       continue;
     }
 
     if (!result.actualResult) {
       skipped += 1;
+
+      if (result.reason === "unfinished") unfinished += 1;
+      if (result.reason === "missing-fixture") noApiMatch += 1;
+      if (result.reason === "missing-score") failed += 1;
+
+      if (debugLines.length < 10) {
+        debugLines.push(
+          `${matchLabel}: skipped - ${result.reason}${
+            result.statusShort ? ` (${result.statusShort})` : ""
+          } fixture ${prediction.fixtureId}`,
+        );
+      }
+
       continue;
     }
 
@@ -885,6 +1036,16 @@ async function syncFinishedResults(formData: FormData) {
     });
 
     synced += 1;
+
+    if (debugLines.length < 10) {
+      debugLines.push(
+        `${matchLabel}: updated ${result.actualResult} from ${
+          result.scoreSource || "score"
+        } ${result.homeScore}-${result.awayScore}${
+          result.statusShort ? ` (${result.statusShort})` : ""
+        }`,
+      );
+    }
   }
 
   redirect(
@@ -894,9 +1055,14 @@ async function syncFinishedResults(formData: FormData) {
       season,
       sort,
       sync: failed > 0 ? "partial" : "success",
+      checked,
       synced,
       skipped,
+      missingFixtureId,
+      unfinished,
+      noApiMatch,
       failed,
+      debug: debugLines.join("||"),
     }),
   );
 }
@@ -1010,9 +1176,14 @@ export default async function Home({
     saved?: string;
     result?: string;
     sync?: string;
+    checked?: string;
     synced?: string;
     skipped?: string;
+    missingFixtureId?: string;
+    unfinished?: string;
+    noApiMatch?: string;
     failed?: string;
+    debug?: string;
   }>;
 }) {
   const cookieStore = await cookies();
@@ -1235,6 +1406,10 @@ export default async function Home({
     return bMax - aMax;
   })[0];
 
+  const syncDebugLines = params?.debug
+    ? params.debug.split("||").filter(Boolean)
+    : [];
+
   return (
     <main className="min-h-screen bg-slate-950 text-white">
       <section className="mx-auto max-w-7xl px-4 py-8">
@@ -1426,6 +1601,100 @@ export default async function Home({
           />
         </section>
 
+        <section className="mt-6 rounded-[2rem] border border-amber-500/30 bg-amber-500/10 p-4 shadow-xl md:p-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
+                Manual result sync
+              </p>
+
+              <h2 className="mt-2 text-2xl font-black text-white">
+                Sync finished results
+              </h2>
+
+              <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-300">
+                Checks pending {getSeasonLabel(selectedSeason)} predictions with
+                stored fixture IDs. Finished matches are updated automatically;
+                skipped matches now show a reason below.
+              </p>
+            </div>
+
+            <form action={syncFinishedResults}>
+              <input type="hidden" name="leagueId" value={selectedLeague.id} />
+              <input type="hidden" name="filter" value={selectedFilter} />
+              <input type="hidden" name="season" value={selectedSeason} />
+              <input type="hidden" name="sort" value={selectedSort} />
+
+              <button
+                type="submit"
+                className="rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-slate-950 hover:bg-amber-300"
+              >
+                Sync Finished Results
+              </button>
+            </form>
+          </div>
+
+          {params?.sync ? (
+            <div className="mt-4 rounded-2xl border border-slate-700 bg-slate-950 p-4">
+              {params.sync === "missing-key" ? (
+                <p className="text-sm font-bold text-red-300">
+                  Missing API_FOOTBALL_KEY in environment variables. Add it in
+                  Vercel before syncing.
+                </p>
+              ) : (
+                <>
+                  <p
+                    className={`text-sm font-black ${
+                      params.sync === "success"
+                        ? "text-emerald-300"
+                        : "text-amber-300"
+                    }`}
+                  >
+                    Result sync {params.sync === "success" ? "complete" : "partially completed"}.
+                  </p>
+
+                  <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-7">
+                    <SyncMetric label="Checked" value={params.checked || "0"} />
+                    <SyncMetric label="Updated" value={params.synced || "0"} />
+                    <SyncMetric label="Skipped" value={params.skipped || "0"} />
+                    <SyncMetric
+                      label="Missing fixtureId"
+                      value={params.missingFixtureId || "0"}
+                    />
+                    <SyncMetric
+                      label="Unfinished"
+                      value={params.unfinished || "0"}
+                    />
+                    <SyncMetric
+                      label="No API match"
+                      value={params.noApiMatch || "0"}
+                    />
+                    <SyncMetric label="Failed" value={params.failed || "0"} />
+                  </div>
+
+                  {syncDebugLines.length > 0 ? (
+                    <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-900 p-3">
+                      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">
+                        Sync debug
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        {syncDebugLines.map((line) => (
+                          <p
+                            key={line}
+                            className="rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs font-bold text-slate-300"
+                          >
+                            {line}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </div>
+          ) : null}
+        </section>
+
         <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
           <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <div>
@@ -1577,63 +1846,6 @@ export default async function Home({
               ))}
             </div>
           </div>
-        </section>
-
-        <section className="mt-6 rounded-[2rem] border border-amber-500/30 bg-amber-500/10 p-4 shadow-xl md:p-5">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
-                Manual result sync
-              </p>
-
-              <h2 className="mt-2 text-2xl font-black text-white">
-                Sync finished results
-              </h2>
-
-              <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-300">
-                Checks pending {getSeasonLabel(selectedSeason)} predictions with
-                stored fixture IDs against API-Football. Finished matches are
-                updated automatically; unfinished or missing fixtures are skipped
-                safely.
-              </p>
-            </div>
-
-            <form action={syncFinishedResults}>
-              <input type="hidden" name="leagueId" value={selectedLeague.id} />
-              <input type="hidden" name="filter" value={selectedFilter} />
-              <input type="hidden" name="season" value={selectedSeason} />
-              <input type="hidden" name="sort" value={selectedSort} />
-
-              <button
-                type="submit"
-                className="rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-slate-950 hover:bg-amber-300"
-              >
-                Sync Finished Results
-              </button>
-            </form>
-          </div>
-
-          {params?.sync === "success" ? (
-            <div className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-bold text-emerald-300">
-              Result sync complete. Updated {params.synced || "0"} finished
-              matches. Skipped {params.skipped || "0"}. Failed{" "}
-              {params.failed || "0"}.
-            </div>
-          ) : null}
-
-          {params?.sync === "partial" ? (
-            <div className="mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm font-bold text-amber-300">
-              Result sync partially completed. Updated {params.synced || "0"}.
-              Skipped {params.skipped || "0"}. Failed {params.failed || "0"}.
-            </div>
-          ) : null}
-
-          {params?.sync === "missing-key" ? (
-            <div className="mt-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-bold text-red-300">
-              Missing API_FOOTBALL_KEY in environment variables. Add it in
-              Vercel before syncing.
-            </div>
-          ) : null}
         </section>
 
         <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
@@ -2087,6 +2299,15 @@ function SavedPredictionRow({
           </form>
         </div>
       </div>
+    </div>
+  );
+}
+
+function SyncMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
+      <p className="text-lg font-black text-white">{value}</p>
+      <p className="text-xs font-bold text-slate-500">{label}</p>
     </div>
   );
 }
