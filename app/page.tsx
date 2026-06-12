@@ -2487,12 +2487,16 @@ function PremiumStatCard({
   detail: string;
 }) {
   return (
-    <div className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 to-slate-950 p-4 shadow-xl md:p-5">
-      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">
+    <div className="flex min-h-[210px] flex-col rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 to-slate-950 p-4 shadow-xl md:p-5">
+      <p className="min-h-[44px] text-xs font-black uppercase tracking-[0.18em] text-slate-500">
         {title}
       </p>
-      <p className="mt-3 text-3xl font-black text-white">{value}</p>
-      <p className="mt-2 text-sm leading-5 text-slate-400">{detail}</p>
+
+      <p className="mt-4 text-3xl font-black leading-none text-white">
+        {value}
+      </p>
+
+      <p className="mt-3 text-sm leading-5 text-slate-400">{detail}</p>
     </div>
   );
 }
