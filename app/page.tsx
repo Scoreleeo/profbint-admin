@@ -37,6 +37,8 @@ type AdminPrediction = {
   confidence: string;
   advice: string;
   bestBet: string;
+  strongestPick: Outcome;
+  strongestPercent: number;
 };
 
 type SavedPrediction = {
@@ -121,7 +123,8 @@ type FinishedFixtureResult = {
   awayScore?: number;
 };
 
-const PROFBINT_PREDICTIONS_URL = "https://profbint.com/api/predictions";
+const PROFBINT_PREDICTIONS_URL =
+  "https://predictions.profbint.com/api/predictions";
 
 const FINISHED_STATUS_CODES = ["FT", "AET", "PEN", "AWD", "WO"];
 
@@ -194,6 +197,10 @@ function normaliseSeason(value: string | undefined): SeasonValue {
   return "2025-26";
 }
 
+function getApiSeason(season: SeasonValue) {
+  return season === "2026-27" ? 2026 : 2025;
+}
+
 function getSeasonLabel(season: string | null | undefined) {
   if (season === "2026-27") return "2026/27";
   return "2025/26";
@@ -245,13 +252,26 @@ function buildHref({
   if (typeof checked === "number") params.set("checked", String(checked));
   if (typeof synced === "number") params.set("synced", String(synced));
   if (typeof skipped === "number") params.set("skipped", String(skipped));
+
   if (typeof missingFixtureId === "number") {
     params.set("missingFixtureId", String(missingFixtureId));
   }
-  if (typeof unfinished === "number") params.set("unfinished", String(unfinished));
-  if (typeof noApiMatch === "number") params.set("noApiMatch", String(noApiMatch));
-  if (typeof failed === "number") params.set("failed", String(failed));
-  if (debug) params.set("debug", debug);
+
+  if (typeof unfinished === "number") {
+    params.set("unfinished", String(unfinished));
+  }
+
+  if (typeof noApiMatch === "number") {
+    params.set("noApiMatch", String(noApiMatch));
+  }
+
+  if (typeof failed === "number") {
+    params.set("failed", String(failed));
+  }
+
+  if (debug) {
+    params.set("debug", debug);
+  }
 
   return `/?${params.toString()}`;
 }
@@ -364,7 +384,9 @@ function getAccuracyStats(predictions: SavedPrediction[]): AccuracyStats {
   };
 }
 
-function getStrongestAccuracyStats(predictions: SavedPrediction[]): AccuracyStats {
+function getStrongestAccuracyStats(
+  predictions: SavedPrediction[],
+): AccuracyStats {
   const completed = predictions.filter(
     (prediction) =>
       prediction.status === "RESULTED" &&
@@ -496,7 +518,10 @@ function filterPredictionsByResult(
   return predictions;
 }
 
-function getActualResultFromGoals(homeGoals: number, awayGoals: number): Outcome {
+function getActualResultFromGoals(
+  homeGoals: number,
+  awayGoals: number,
+): Outcome {
   if (homeGoals > awayGoals) return "HOME";
   if (awayGoals > homeGoals) return "AWAY";
   return "DRAW";
@@ -518,31 +543,57 @@ function getBestFinishedScore(
   statusShort: string,
 ) {
   const goalsScore = readScorePair(fixture.goals?.home, fixture.goals?.away);
+
   const fulltimeScore = readScorePair(
     fixture.score?.fulltime?.home,
     fixture.score?.fulltime?.away,
   );
+
   const extratimeScore = readScorePair(
     fixture.score?.extratime?.home,
     fixture.score?.extratime?.away,
   );
+
   const penaltyScore = readScorePair(
     fixture.score?.penalty?.home,
     fixture.score?.penalty?.away,
   );
 
   if (statusShort === "PEN") {
-    if (fulltimeScore) return { ...fulltimeScore, source: "score.fulltime" };
-    if (goalsScore) return { ...goalsScore, source: "goals" };
-    if (extratimeScore) return { ...extratimeScore, source: "score.extratime" };
-    if (penaltyScore) return { ...penaltyScore, source: "score.penalty" };
+    if (fulltimeScore) {
+      return { ...fulltimeScore, source: "score.fulltime" };
+    }
+
+    if (goalsScore) {
+      return { ...goalsScore, source: "goals" };
+    }
+
+    if (extratimeScore) {
+      return { ...extratimeScore, source: "score.extratime" };
+    }
+
+    if (penaltyScore) {
+      return { ...penaltyScore, source: "score.penalty" };
+    }
+
     return null;
   }
 
-  if (goalsScore) return { ...goalsScore, source: "goals" };
-  if (fulltimeScore) return { ...fulltimeScore, source: "score.fulltime" };
-  if (extratimeScore) return { ...extratimeScore, source: "score.extratime" };
-  if (penaltyScore) return { ...penaltyScore, source: "score.penalty" };
+  if (goalsScore) {
+    return { ...goalsScore, source: "goals" };
+  }
+
+  if (fulltimeScore) {
+    return { ...fulltimeScore, source: "score.fulltime" };
+  }
+
+  if (extratimeScore) {
+    return { ...extratimeScore, source: "score.extratime" };
+  }
+
+  if (penaltyScore) {
+    return { ...penaltyScore, source: "score.penalty" };
+  }
 
   return null;
 }
@@ -583,6 +634,7 @@ function normalisePrediction(
     "Away team";
 
   const homePercent =
+    readNumber(prediction.homeWin) ||
     readNumber(probabilities.home) ||
     readNumber(readObject(raw.percentages).home) ||
     readNumber(readObject(raw.percentages).home_win) ||
@@ -590,12 +642,14 @@ function normalisePrediction(
     readNumber(raw.home_percentage);
 
   const drawPercent =
+    readNumber(prediction.draw) ||
     readNumber(probabilities.draw) ||
     readNumber(readObject(raw.percentages).draw) ||
     readNumber(raw.drawPercent) ||
     readNumber(raw.draw_percentage);
 
   const awayPercent =
+    readNumber(prediction.awayWin) ||
     readNumber(probabilities.away) ||
     readNumber(readObject(raw.percentages).away) ||
     readNumber(readObject(raw.percentages).away_win) ||
@@ -604,8 +658,28 @@ function normalisePrediction(
 
   const choices = getTopChoices(homePercent, drawPercent, awayPercent);
 
+  const strongestPickRaw = readString(
+    prediction.strongestPick,
+  ).toUpperCase();
+
+  const strongestPick: Outcome =
+    strongestPickRaw === "HOME" ||
+    strongestPickRaw === "DRAW" ||
+    strongestPickRaw === "AWAY"
+      ? strongestPickRaw
+      : choices.firstChoice;
+
+  const strongestPercent =
+    strongestPick === "HOME"
+      ? homePercent
+      : strongestPick === "DRAW"
+        ? drawPercent
+        : awayPercent;
+
   const rawFixtureId =
-    readNumber(raw.fixtureId) || readNumber(raw.fixture_id) || readNumber(raw.id);
+    readNumber(raw.fixtureId) ||
+    readNumber(raw.fixture_id) ||
+    readNumber(raw.id);
 
   return {
     id: String(raw.fixtureId || raw.fixture_id || raw.id || index),
@@ -633,13 +707,15 @@ function normalisePrediction(
     firstChoice: choices.firstChoice,
     secondChoice: choices.secondChoice,
     confidence:
-      readString(prediction.confidence) || readString(raw.confidence) || "N/A",
+      readString(prediction.confidence) ||
+      readString(raw.confidence) ||
+      "N/A",
     advice:
       readString(prediction.advice) ||
       readString(prediction.summary) ||
       readString(prediction.reason) ||
       readString(raw.advice) ||
-      "No advice available yet.",
+      "Predictions V2 model output.",
     bestBet:
       readString(prediction.best_bet) ||
       readString(prediction.bestBet) ||
@@ -647,15 +723,17 @@ function normalisePrediction(
       readString(raw.best_bet) ||
       readString(raw.bestBet) ||
       readString(raw.winner) ||
-      `${getOutcomeLabel(choices.firstChoice)} is the current top model pick.`,
+      `${getOutcomeLabel(strongestPick)} is the Predictions V2 strongest pick.`,
+    strongestPick,
+    strongestPercent,
   };
 }
 
-async function getPredictions(leagueId: string) {
+async function getPredictions(leagueId: string, season: SeasonValue) {
   try {
     const url = `${PROFBINT_PREDICTIONS_URL}?league=${encodeURIComponent(
       leagueId,
-    )}`;
+    )}&season=${getApiSeason(season)}`;
 
     const response = await fetch(url, {
       cache: "no-store",
@@ -664,7 +742,7 @@ async function getPredictions(leagueId: string) {
     if (!response.ok) {
       return {
         predictions: [] as AdminPrediction[],
-        error: `Pro Football Intel API returned ${response.status}`,
+        error: `Predictions V2 API returned ${response.status}`,
       };
     }
 
@@ -690,7 +768,7 @@ async function getPredictions(leagueId: string) {
   } catch {
     return {
       predictions: [] as AdminPrediction[],
-      error: "Could not connect to the Pro Football Intel prediction API.",
+      error: "Could not connect to the Predictions V2 API.",
     };
   }
 }
@@ -838,15 +916,9 @@ async function saveLeagueSnapshot(formData: FormData) {
   const selectedLeague =
     LEAGUES.find((league) => league.id === leagueId) || LEAGUES[0];
 
-  const { predictions } = await getPredictions(selectedLeague.id);
+  const { predictions } = await getPredictions(selectedLeague.id, season);
 
   for (const prediction of predictions) {
-    const strongestPercent = Math.max(
-      prediction.homePercent,
-      prediction.drawPercent,
-      prediction.awayPercent,
-    );
-
     const kickoffDate = parseKickoffDate(prediction.kickoffIso);
 
     const existing = prediction.fixtureId
@@ -880,8 +952,8 @@ async function saveLeagueSnapshot(formData: FormData) {
       homeWinPercent: prediction.homePercent,
       drawPercent: prediction.drawPercent,
       awayWinPercent: prediction.awayPercent,
-      strongestPick: prediction.firstChoice,
-      strongestPercent,
+      strongestPick: prediction.strongestPick,
+      strongestPercent: prediction.strongestPercent,
     };
 
     if (existing) {
@@ -972,6 +1044,7 @@ async function syncFinishedResults(formData: FormData) {
 
   for (const prediction of pendingPredictions) {
     checked += 1;
+
     const matchLabel = `${prediction.homeTeam} vs ${prediction.awayTeam}`;
 
     if (!prediction.fixtureId) {
@@ -1002,9 +1075,17 @@ async function syncFinishedResults(formData: FormData) {
     if (!result.actualResult) {
       skipped += 1;
 
-      if (result.reason === "unfinished") unfinished += 1;
-      if (result.reason === "missing-fixture") noApiMatch += 1;
-      if (result.reason === "missing-score") failed += 1;
+      if (result.reason === "unfinished") {
+        unfinished += 1;
+      }
+
+      if (result.reason === "missing-fixture") {
+        noApiMatch += 1;
+      }
+
+      if (result.reason === "missing-score") {
+        failed += 1;
+      }
 
       if (debugLines.length < 10) {
         debugLines.push(
@@ -1247,7 +1328,10 @@ export default async function Home({
     );
   }
 
-  const { predictions, error } = await getPredictions(selectedLeague.id);
+  const { predictions, error } = await getPredictions(
+    selectedLeague.id,
+    selectedSeason,
+  );
 
   const savedWhere =
     selectedFilter === "pending"
@@ -1318,21 +1402,26 @@ export default async function Home({
   );
 
   const overallStats = getAccuracyStats(analyticsPredictions);
+
   const selectedLeagueStats = getAccuracyStats(
     filterPredictionsByResult(selectedLeagueCompleted, selectedFilter),
   );
+
   const strongestStats = getStrongestAccuracyStats(analyticsPredictions);
   const firstChoiceStats = getAccuracyStats(analyticsPredictions);
-  const secondChoiceStats = getSecondChoiceAccuracyStats(analyticsPredictions);
+  const secondChoiceStats =
+    getSecondChoiceAccuracyStats(analyticsPredictions);
 
   const homePredictionStats = getPredictionTypeAccuracyStats(
     analyticsPredictions,
     "HOME",
   );
+
   const drawPredictionStats = getPredictionTypeAccuracyStats(
     analyticsPredictions,
     "DRAW",
   );
+
   const awayPredictionStats = getPredictionTypeAccuracyStats(
     analyticsPredictions,
     "AWAY",
@@ -1342,10 +1431,12 @@ export default async function Home({
     analyticsPredictions,
     "High confidence",
   );
+
   const mediumConfidenceStats = getConfidenceAccuracyStats(
     analyticsPredictions,
     "Medium confidence",
   );
+
   const lowConfidenceStats = getConfidenceAccuracyStats(
     analyticsPredictions,
     "Low confidence",
@@ -1392,19 +1483,17 @@ export default async function Home({
     const aAccuracy = a.stats.completed
       ? Math.round((a.stats.wins / a.stats.completed) * 100)
       : -1;
+
     const bAccuracy = b.stats.completed
       ? Math.round((b.stats.wins / b.stats.completed) * 100)
       : -1;
 
-    if (bAccuracy !== aAccuracy) return bAccuracy - aAccuracy;
+    if (bAccuracy !== aAccuracy) {
+      return bAccuracy - aAccuracy;
+    }
+
     return b.stats.completed - a.stats.completed;
   });
-
-  const strongestPick = [...predictions].sort((a, b) => {
-    const aMax = Math.max(a.homePercent, a.drawPercent, a.awayPercent);
-    const bMax = Math.max(b.homePercent, b.drawPercent, b.awayPercent);
-    return bMax - aMax;
-  })[0];
 
   const syncDebugLines = params?.debug
     ? params.debug.split("||").filter(Boolean)
@@ -1425,8 +1514,8 @@ export default async function Home({
               </h1>
 
               <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
-                Track saved predictions, update match results, sync finished
-                fixtures, and prepare clean result data for future graphs.
+                Predictions V2 imports, saved prediction history, automatic
+                settlement and verified accuracy reporting.
               </p>
             </div>
 
@@ -1438,7 +1527,7 @@ export default async function Home({
                     : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
                 }`}
               >
-                API {error ? "issue" : "online"}
+                Predictions V2 API {error ? "issue" : "online"}
               </div>
 
               <form action={logout}>
@@ -1478,6 +1567,7 @@ export default async function Home({
                   }`}
                 >
                   <span className="block">{league.shortName}</span>
+
                   <span
                     className={`mt-1 block text-xs ${
                       isActive ? "text-slate-800" : "text-slate-500"
@@ -1503,8 +1593,8 @@ export default async function Home({
               </h2>
 
               <p className="mt-1 text-sm text-slate-400">
-                Filters are stored in the URL so each view can be refreshed and
-                safely returned to after updates.
+                The selected season is sent directly to Predictions V2 when
+                loading or saving a league snapshot.
               </p>
             </div>
 
@@ -1520,6 +1610,7 @@ export default async function Home({
                 <span className="mb-2 block text-xs font-black uppercase tracking-[0.18em] text-slate-500">
                   Season
                 </span>
+
                 <select
                   name="season"
                   defaultValue={selectedSeason}
@@ -1537,6 +1628,7 @@ export default async function Home({
                 <span className="mb-2 block text-xs font-black uppercase tracking-[0.18em] text-slate-500">
                   Sort
                 </span>
+
                 <select
                   name="sort"
                   defaultValue={selectedSort}
@@ -1613,9 +1705,8 @@ export default async function Home({
               </h2>
 
               <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-300">
-                Checks pending {getSeasonLabel(selectedSeason)} predictions with
-                stored fixture IDs. Finished matches are updated automatically;
-                skipped matches now show a reason below.
+                Checks pending {getSeasonLabel(selectedSeason)} Predictions V2
+                records with stored fixture IDs. Settlement remains unchanged.
               </p>
             </div>
 
@@ -1650,25 +1741,33 @@ export default async function Home({
                         : "text-amber-300"
                     }`}
                   >
-                    Result sync {params.sync === "success" ? "complete" : "partially completed"}.
+                    Result sync{" "}
+                    {params.sync === "success"
+                      ? "complete"
+                      : "partially completed"}
+                    .
                   </p>
 
                   <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-7">
                     <SyncMetric label="Checked" value={params.checked || "0"} />
                     <SyncMetric label="Updated" value={params.synced || "0"} />
                     <SyncMetric label="Skipped" value={params.skipped || "0"} />
+
                     <SyncMetric
                       label="Missing fixtureId"
                       value={params.missingFixtureId || "0"}
                     />
+
                     <SyncMetric
                       label="Unfinished"
                       value={params.unfinished || "0"}
                     />
+
                     <SyncMetric
                       label="No API match"
                       value={params.noApiMatch || "0"}
                     />
+
                     <SyncMetric label="Failed" value={params.failed || "0"} />
                   </div>
 
@@ -1677,6 +1776,7 @@ export default async function Home({
                       <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">
                         Sync debug
                       </p>
+
                       <div className="mt-3 space-y-2">
                         {syncDebugLines.map((line) => (
                           <p
@@ -1708,8 +1808,8 @@ export default async function Home({
               </h2>
 
               <p className="mt-1 text-sm text-slate-400">
-                Server-side calculations from PredictionHistory. No graphs yet;
-                this keeps the data ready for future results dashboards.
+                Server-side calculations from the existing PredictionHistory
+                table.
               </p>
             </div>
 
@@ -1725,7 +1825,7 @@ export default async function Home({
               total={strongestStats.completed}
               wins={strongestStats.wins}
               losses={strongestStats.losses}
-              note="Based on strongestPick vs actualResult"
+              note="Based on Predictions V2 strongestPick vs actualResult"
             />
 
             <IntelligenceCard
@@ -1734,7 +1834,7 @@ export default async function Home({
               total={firstChoiceStats.completed}
               wins={firstChoiceStats.wins}
               losses={firstChoiceStats.losses}
-              note="Main model pick performance"
+              note="Highest Predictions V2 1X2 percentage"
             />
 
             <IntelligenceCard
@@ -1743,7 +1843,7 @@ export default async function Home({
               total={secondChoiceStats.completed}
               wins={secondChoiceStats.wins}
               losses={secondChoiceStats.losses}
-              note="Backup model pick performance"
+              note="Second-highest Predictions V2 1X2 percentage"
             />
           </div>
 
@@ -1754,11 +1854,13 @@ export default async function Home({
                 value={homePredictionStats.accuracy}
                 detail={`${homePredictionStats.wins} won · ${homePredictionStats.losses} lost · ${homePredictionStats.completed} total`}
               />
+
               <AnalyticsRow
                 label="DRAW predictions"
                 value={drawPredictionStats.accuracy}
                 detail={`${drawPredictionStats.wins} won · ${drawPredictionStats.losses} lost · ${drawPredictionStats.completed} total`}
               />
+
               <AnalyticsRow
                 label="AWAY predictions"
                 value={awayPredictionStats.accuracy}
@@ -1772,11 +1874,13 @@ export default async function Home({
                 value={highConfidenceStats.accuracy}
                 detail={`${highConfidenceStats.wins} won · ${highConfidenceStats.losses} lost · ${highConfidenceStats.completed} total`}
               />
+
               <AnalyticsRow
                 label="Medium confidence"
                 value={mediumConfidenceStats.accuracy}
                 detail={`${mediumConfidenceStats.wins} won · ${mediumConfidenceStats.losses} lost · ${mediumConfidenceStats.completed} total`}
               />
+
               <AnalyticsRow
                 label="Low confidence"
                 value={lowConfidenceStats.accuracy}
@@ -1790,11 +1894,13 @@ export default async function Home({
                 value={String(todayWins)}
                 detail="First-choice wins updated today"
               />
+
               <AnalyticsRow
                 label="Today's losses"
                 value={String(todayLosses)}
                 detail="First-choice losses updated today"
               />
+
               <AnalyticsRow
                 label="Today's strongest wins"
                 value={String(todayStrongestWins)}
@@ -1805,21 +1911,18 @@ export default async function Home({
         </section>
 
         <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
-          <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-            <div>
-              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
-                League ranking table
-              </p>
+          <div>
+            <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
+              League ranking table
+            </p>
 
-              <h2 className="mt-2 text-2xl font-black">
-                Accuracy ranked highest first
-              </h2>
+            <h2 className="mt-2 text-2xl font-black">
+              Accuracy ranked highest first
+            </h2>
 
-              <p className="mt-1 text-sm text-slate-400">
-                Sorted by accuracy, then by settled prediction volume. Uses the
-                selected season and current result filter.
-              </p>
-            </div>
+            <p className="mt-1 text-sm text-slate-400">
+              Sorted by accuracy, then by settled prediction volume.
+            </p>
           </div>
 
           <div className="mt-5 overflow-hidden rounded-2xl border border-slate-800">
@@ -1884,7 +1987,7 @@ export default async function Home({
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
               <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
-                Saved prediction history
+                Predictions V2 history
               </p>
 
               <h2 className="mt-2 text-2xl font-black">
@@ -1892,8 +1995,8 @@ export default async function Home({
               </h2>
 
               <p className="mt-1 text-sm text-slate-400">
-                Save the current league snapshot, then update actual results
-                with 1, X, 2, or reset back to pending.
+                Import the current Predictions V2 league snapshot into
+                PredictionHistory.
               </p>
             </div>
 
@@ -1907,14 +2010,15 @@ export default async function Home({
                 type="submit"
                 className="rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-slate-950 hover:bg-amber-300"
               >
-                Save current league snapshot
+                Import Predictions V2 snapshot
               </button>
             </form>
           </div>
 
           {params?.saved === "true" ? (
             <div className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-bold text-emerald-300">
-              Snapshot saved successfully for {selectedLeague.name}.
+              Predictions V2 snapshot saved successfully for{" "}
+              {selectedLeague.name}.
             </div>
           ) : null}
 
@@ -1963,8 +2067,8 @@ export default async function Home({
               })}
               className={`rounded-2xl border px-4 py-2 text-sm font-black transition ${
                 selectedSort === "newest"
-                  ? "border-sky-400 bg-sky-400 text-slate-950"
-                  : "border-slate-700 bg-slate-950 text-slate-300 hover:border-sky-400 hover:text-sky-300"
+                  ? "border-amber-400 bg-amber-400 text-slate-950"
+                  : "border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-400 hover:text-amber-300"
               }`}
             >
               Newest first
@@ -1979,8 +2083,8 @@ export default async function Home({
               })}
               className={`rounded-2xl border px-4 py-2 text-sm font-black transition ${
                 selectedSort === "oldest"
-                  ? "border-sky-400 bg-sky-400 text-slate-950"
-                  : "border-slate-700 bg-slate-950 text-slate-300 hover:border-sky-400 hover:text-sky-300"
+                  ? "border-amber-400 bg-amber-400 text-slate-950"
+                  : "border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-400 hover:text-amber-300"
               }`}
             >
               Oldest first
@@ -2009,50 +2113,9 @@ export default async function Home({
           </div>
         </section>
 
-        <section className="mt-6 rounded-[2rem] border border-slate-800 bg-slate-900 p-4 shadow-xl md:p-5">
-          <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-            <div>
-              <p className="text-sm font-black uppercase tracking-[0.25em] text-amber-300">
-                Future graph data
-              </p>
-
-              <h2 className="mt-2 text-2xl font-black">Prepared metrics</h2>
-
-              <p className="mt-1 text-sm text-slate-400">
-                These clean season-level calculations are ready for future
-                cumulative profit, strongest-pick, league comparison, and
-                monthly trend graphs.
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm font-bold text-slate-300">
-              Read-only graph prep
-            </div>
-          </div>
-
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <GraphPrepCard
-              title="Cumulative profit line"
-              detail={`${completedSeasonPredictions.length} completed rows ready`}
-            />
-            <GraphPrepCard
-              title="Strongest pick graph"
-              detail={`${strongestStats.completed} strongest-pick results ready`}
-            />
-            <GraphPrepCard
-              title="League comparison"
-              detail={`${leagueBreakdown.length} tracked leagues configured`}
-            />
-            <GraphPrepCard
-              title="Monthly trends"
-              detail={`${getSeasonLabel(selectedSeason)} season filter active`}
-            />
-          </div>
-        </section>
-
         {error ? (
           <div className="mt-6 rounded-3xl border border-red-900 bg-red-950/40 p-5 text-red-200">
-            <p className="font-black">Prediction API error</p>
+            <p className="font-black">Predictions V2 API error</p>
             <p className="mt-2 text-sm">{error}</p>
           </div>
         ) : null}
@@ -2060,24 +2123,24 @@ export default async function Home({
         <div className="mt-8 flex flex-col gap-3 border-b border-slate-800 pb-5 md:flex-row md:items-end md:justify-between">
           <div>
             <h2 className="text-2xl font-black">
-              {selectedLeague.name} live prediction board
+              {selectedLeague.name} Predictions V2 feed
             </h2>
 
             <p className="mt-1 text-sm text-slate-400">
-              First and second choice are calculated from the 1X2 percentages
-              returned by the Pro Football Intel API.
+              First and second choice are ranked from the V2 home, draw and away
+              percentages. The V2 strongest pick is stored separately.
             </p>
           </div>
 
           <div className="rounded-full border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-bold text-amber-300">
-            Private admin view
+            Predictions V2 source
           </div>
         </div>
 
         <div className="mt-6 grid gap-5">
           {predictions.length === 0 && !error ? (
             <div className="rounded-3xl border border-slate-800 bg-slate-900 p-6 text-slate-300">
-              No predictions returned for {selectedLeague.name} yet.
+              No Predictions V2 matches returned for {selectedLeague.name}.
             </div>
           ) : null}
 
@@ -2120,19 +2183,19 @@ export default async function Home({
                     <PercentBox
                       label="Home win"
                       value={prediction.homePercent}
-                      active={prediction.firstChoice === "HOME"}
+                      active={prediction.strongestPick === "HOME"}
                     />
 
                     <PercentBox
                       label="Draw"
                       value={prediction.drawPercent}
-                      active={prediction.firstChoice === "DRAW"}
+                      active={prediction.strongestPick === "DRAW"}
                     />
 
                     <PercentBox
                       label="Away win"
                       value={prediction.awayPercent}
-                      active={prediction.firstChoice === "AWAY"}
+                      active={prediction.strongestPick === "AWAY"}
                     />
                   </div>
                 </div>
@@ -2151,11 +2214,17 @@ export default async function Home({
                       choice={getOutcomeLabel(prediction.secondChoice)}
                       badge={getOutcomeShortLabel(prediction.secondChoice)}
                     />
+
+                    <ChoiceBox
+                      title="V2 strongest pick"
+                      choice={getOutcomeLabel(prediction.strongestPick)}
+                      badge={getOutcomeShortLabel(prediction.strongestPick)}
+                    />
                   </div>
 
                   <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950 p-4">
                     <p className="text-xs font-black uppercase tracking-[0.22em] text-slate-500">
-                      Confidence
+                      V2 confidence
                     </p>
 
                     <p className="mt-2 text-3xl font-black text-white">
@@ -2251,7 +2320,7 @@ function SavedPredictionRow({
             />
 
             <MiniResultBox
-              title="Strongest pick"
+              title="V2 strongest pick"
               value={`${getOutcomeShortLabel(
                 prediction.strongestPick,
               )} · ${getOutcomeLabel(prediction.strongestPick)}${
@@ -2370,21 +2439,26 @@ function IntelligenceCard({
       <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-500">
         {title}
       </p>
+
       <p className="mt-3 text-4xl font-black text-white">{value}</p>
+
       <div className="mt-4 grid grid-cols-3 gap-2 text-center">
         <div className="rounded-2xl border border-slate-800 bg-slate-900 p-3">
           <p className="text-lg font-black text-white">{total}</p>
           <p className="text-xs font-bold text-slate-500">Total</p>
         </div>
+
         <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3">
           <p className="text-lg font-black text-emerald-300">{wins}</p>
           <p className="text-xs font-bold text-emerald-400/80">Won</p>
         </div>
+
         <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-3">
           <p className="text-lg font-black text-red-300">{losses}</p>
           <p className="text-xs font-bold text-red-400/80">Lost</p>
         </div>
       </div>
+
       <p className="mt-3 text-sm leading-5 text-slate-400">{note}</p>
     </div>
   );
@@ -2402,6 +2476,7 @@ function AnalyticsPanel({
       <p className="text-sm font-black uppercase tracking-[0.18em] text-slate-500">
         {title}
       </p>
+
       <div className="mt-4 space-y-3">{children}</div>
     </div>
   );
@@ -2423,6 +2498,7 @@ function AnalyticsRow({
           <p className="font-black text-white">{label}</p>
           <p className="mt-1 text-sm text-slate-400">{detail}</p>
         </div>
+
         <p className="text-2xl font-black text-amber-300">{value}</p>
       </div>
     </div>
@@ -2460,16 +2536,20 @@ function LeagueRankingRow({
         >
           {rank}
         </span>
+
         <div>
           <p className="font-black text-white">{league}</p>
+
           <p className="text-xs text-slate-500 md:hidden">
             {wins}W · {losses}L · {settled} settled
           </p>
         </div>
       </div>
+
       <p className="hidden font-bold text-slate-300 md:block">{settled}</p>
       <p className="hidden font-bold text-emerald-300 md:block">{wins}</p>
       <p className="hidden font-bold text-red-300 md:block">{losses}</p>
+
       <p className="text-2xl font-black text-white md:text-base md:text-amber-300">
         {accuracy}
       </p>
@@ -2545,15 +2625,6 @@ function LeagueAccuracyCard({
   );
 }
 
-function GraphPrepCard({ title, detail }: { title: string; detail: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-      <p className="font-black text-white">{title}</p>
-      <p className="mt-2 text-sm text-slate-400">{detail}</p>
-    </div>
-  );
-}
-
 function PercentBox({
   label,
   value,
@@ -2573,9 +2644,10 @@ function PercentBox({
     >
       <p className="text-sm font-bold text-slate-400">{label}</p>
       <p className="mt-2 text-3xl font-black text-white">{value}%</p>
+
       {active ? (
         <p className="mt-1 text-xs font-black uppercase tracking-[0.16em] text-amber-300">
-          top pick
+          V2 strongest
         </p>
       ) : null}
     </div>
