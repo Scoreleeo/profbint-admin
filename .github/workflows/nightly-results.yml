@@ -1,0 +1,56 @@
+name: Pro Football Intel Nightly Results
+
+on:
+  schedule:
+    # Covers 23:37 Europe/London throughout GMT and BST.
+    # The Admin endpoint ignores the run outside the 23:00-23:59 London window.
+    - cron: "37 22 * * *"
+    - cron: "37 23 * * *"
+  workflow_dispatch:
+
+jobs:
+  nightly-results:
+    name: Import predictions and settle results
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Run Pro Football Intel nightly pipeline
+        env:
+          NIGHTLY_RESULTS_SECRET: ${{ secrets.NIGHTLY_RESULTS_SECRET }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${NIGHTLY_RESULTS_SECRET:-}" ]; then
+            echo "NIGHTLY_RESULTS_SECRET is not configured in GitHub Actions."
+            exit 1
+          fi
+
+          EXTRA_HEADER=()
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            EXTRA_HEADER=(-H "x-profbint-force: true")
+          fi
+
+          HTTP_CODE=$(curl \
+            --silent \
+            --show-error \
+            --output response.json \
+            --write-out "%{http_code}" \
+            --request POST \
+            --retry 2 \
+            --retry-delay 5 \
+            --max-time 300 \
+            -H "Authorization: Bearer ${NIGHTLY_RESULTS_SECRET}" \
+            -H "Accept: application/json" \
+            "${EXTRA_HEADER[@]}" \
+            "https://admin.profbint.com/api/automation/nightly-results")
+
+          echo "HTTP status: ${HTTP_CODE}"
+          cat response.json
+          echo
+
+          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+            echo "Nightly Admin pipeline failed."
+            exit 1
+          fi
