@@ -194,7 +194,7 @@ function normaliseSeason(value: string | undefined): SeasonValue {
     return "2026-27";
   }
 
-  return "2025-26";
+  return "2026-27";
 }
 
 function getApiSeason(season: SeasonValue) {
@@ -213,6 +213,12 @@ function buildHref({
   sort,
   result,
   saved,
+  importAll,
+  importReceived,
+  importCreated,
+  importUpdated,
+  importMissingFixtureId,
+  importFailed,
   sync,
   checked,
   synced,
@@ -229,6 +235,12 @@ function buildHref({
   sort: SortOrder;
   result?: string;
   saved?: string;
+  importAll?: string;
+  importReceived?: number;
+  importCreated?: number;
+  importUpdated?: number;
+  importMissingFixtureId?: number;
+  importFailed?: number;
   sync?: string;
   checked?: number;
   synced?: number;
@@ -248,6 +260,22 @@ function buildHref({
 
   if (result) params.set("result", result);
   if (saved) params.set("saved", saved);
+  if (importAll) params.set("importAll", importAll);
+  if (typeof importReceived === "number") {
+    params.set("importReceived", String(importReceived));
+  }
+  if (typeof importCreated === "number") {
+    params.set("importCreated", String(importCreated));
+  }
+  if (typeof importUpdated === "number") {
+    params.set("importUpdated", String(importUpdated));
+  }
+  if (typeof importMissingFixtureId === "number") {
+    params.set("importMissingFixtureId", String(importMissingFixtureId));
+  }
+  if (typeof importFailed === "number") {
+    params.set("importFailed", String(importFailed));
+  }
   if (sync) params.set("sync", sync);
   if (typeof checked === "number") params.set("checked", String(checked));
   if (typeof synced === "number") params.set("synced", String(synced));
@@ -910,7 +938,7 @@ async function saveLeagueSnapshot(formData: FormData) {
 
   const leagueId = String(formData.get("leagueId") || "39");
   const filter = normaliseFilter(String(formData.get("filter") || "all"));
-  const season = normaliseSeason(String(formData.get("season") || "2025-26"));
+  const season = normaliseSeason(String(formData.get("season") || "2026-27"));
   const sort = normaliseSort(String(formData.get("sort") || "newest"));
 
   const selectedLeague =
@@ -987,6 +1015,121 @@ async function saveLeagueSnapshot(formData: FormData) {
   );
 }
 
+
+async function importAllPredictionsV2(formData: FormData) {
+  "use server";
+
+  const cookieStore = await cookies();
+  const isLoggedIn = cookieStore.get("profbint_admin")?.value === "true";
+
+  if (!isLoggedIn) {
+    redirect("/");
+  }
+
+  const leagueId = String(formData.get("leagueId") || "39");
+  const filter = normaliseFilter(String(formData.get("filter") || "all"));
+  const season = normaliseSeason(String(formData.get("season") || "2026-27"));
+  const sort = normaliseSort(String(formData.get("sort") || "newest"));
+
+  let received = 0;
+  let created = 0;
+  let updated = 0;
+  let missingFixtureId = 0;
+  let failed = 0;
+
+  for (const league of LEAGUES) {
+    const result = await getPredictions(league.id, season);
+
+    if (result.error) {
+      failed += 1;
+      continue;
+    }
+
+    received += result.predictions.length;
+
+    for (const prediction of result.predictions) {
+      try {
+        const kickoffDate = parseKickoffDate(prediction.kickoffIso);
+
+        if (!prediction.fixtureId) {
+          missingFixtureId += 1;
+        }
+
+        const existing = prediction.fixtureId
+          ? await prisma.predictionHistory.findFirst({
+              where: {
+                fixtureId: prediction.fixtureId,
+                leagueId: prediction.leagueId,
+                season,
+              },
+            })
+          : await prisma.predictionHistory.findFirst({
+              where: {
+                leagueId: prediction.leagueId,
+                season,
+                homeTeam: prediction.homeTeam,
+                awayTeam: prediction.awayTeam,
+                kickoff: kickoffDate,
+              },
+            });
+
+        const baseData = {
+          fixtureId: prediction.fixtureId || null,
+          leagueId: prediction.leagueId,
+          leagueName: league.name,
+          season,
+          homeTeam: prediction.homeTeam,
+          awayTeam: prediction.awayTeam,
+          kickoff: kickoffDate,
+          firstChoice: prediction.firstChoice,
+          secondChoice: prediction.secondChoice,
+          homeWinPercent: prediction.homePercent,
+          drawPercent: prediction.drawPercent,
+          awayWinPercent: prediction.awayPercent,
+          strongestPick: prediction.strongestPick,
+          strongestPercent: prediction.strongestPercent,
+        };
+
+        if (existing) {
+          await prisma.predictionHistory.update({
+            where: { id: existing.id },
+            data: baseData,
+          });
+          updated += 1;
+        } else {
+          await prisma.predictionHistory.create({
+            data: {
+              ...baseData,
+              actualResult: null,
+              firstChoiceResult: null,
+              secondChoiceResult: null,
+              status: "PENDING",
+            },
+          });
+          created += 1;
+        }
+      } catch {
+        failed += 1;
+      }
+    }
+  }
+
+  redirect(
+    buildHref({
+      leagueId,
+      filter,
+      season,
+      sort,
+      importAll: failed > 0 ? "partial" : "success",
+      importReceived: received,
+      importCreated: created,
+      importUpdated: updated,
+      importMissingFixtureId: missingFixtureId,
+      importFailed: failed,
+    }),
+  );
+}
+
 async function syncFinishedResults(formData: FormData) {
   "use server";
 
@@ -999,7 +1142,7 @@ async function syncFinishedResults(formData: FormData) {
 
   const leagueId = String(formData.get("leagueId") || "39");
   const filter = normaliseFilter(String(formData.get("filter") || "all"));
-  const season = normaliseSeason(String(formData.get("season") || "2025-26"));
+  const season = normaliseSeason(String(formData.get("season") || "2026-27"));
   const sort = normaliseSort(String(formData.get("sort") || "newest"));
 
   if (!process.env.API_FOOTBALL_KEY) {
@@ -1161,7 +1304,7 @@ async function updateResult(formData: FormData) {
   const id = Number(formData.get("id"));
   const leagueId = String(formData.get("leagueId") || "39");
   const filter = normaliseFilter(String(formData.get("filter") || "all"));
-  const season = normaliseSeason(String(formData.get("season") || "2025-26"));
+  const season = normaliseSeason(String(formData.get("season") || "2026-27"));
   const sort = normaliseSort(String(formData.get("sort") || "newest"));
   const actualResult = String(formData.get("actualResult") || "");
 
@@ -1217,7 +1360,7 @@ async function resetResult(formData: FormData) {
   const id = Number(formData.get("id"));
   const leagueId = String(formData.get("leagueId") || "39");
   const filter = normaliseFilter(String(formData.get("filter") || "all"));
-  const season = normaliseSeason(String(formData.get("season") || "2025-26"));
+  const season = normaliseSeason(String(formData.get("season") || "2026-27"));
   const sort = normaliseSort(String(formData.get("sort") || "newest"));
 
   if (!id) {
@@ -1256,6 +1399,12 @@ export default async function Home({
     sort?: string;
     saved?: string;
     result?: string;
+    importAll?: string;
+    importReceived?: string;
+    importCreated?: string;
+    importUpdated?: string;
+    importMissingFixtureId?: string;
+    importFailed?: string;
     sync?: string;
     checked?: string;
     synced?: string;
@@ -1995,30 +2144,96 @@ export default async function Home({
               </h2>
 
               <p className="mt-1 text-sm text-slate-400">
-                Import the current Predictions V2 league snapshot into
-                PredictionHistory.
+                Import the selected league or all seven Predictions V2 leagues into
+                PredictionHistory for the selected season.
               </p>
             </div>
 
-            <form action={saveLeagueSnapshot}>
-              <input type="hidden" name="leagueId" value={selectedLeague.id} />
-              <input type="hidden" name="filter" value={selectedFilter} />
-              <input type="hidden" name="season" value={selectedSeason} />
-              <input type="hidden" name="sort" value={selectedSort} />
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <form action={saveLeagueSnapshot}>
+                <input type="hidden" name="leagueId" value={selectedLeague.id} />
+                <input type="hidden" name="filter" value={selectedFilter} />
+                <input type="hidden" name="season" value={selectedSeason} />
+                <input type="hidden" name="sort" value={selectedSort} />
 
-              <button
-                type="submit"
-                className="rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-slate-950 hover:bg-amber-300"
-              >
-                Import Predictions V2 snapshot
-              </button>
-            </form>
+                <button
+                  type="submit"
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-5 py-3 text-sm font-black text-slate-200 transition hover:border-amber-400 hover:text-amber-300 sm:w-auto"
+                >
+                  Import Selected League
+                </button>
+              </form>
+
+              <form action={importAllPredictionsV2}>
+                <input type="hidden" name="leagueId" value={selectedLeague.id} />
+                <input type="hidden" name="filter" value={selectedFilter} />
+                <input type="hidden" name="season" value={selectedSeason} />
+                <input type="hidden" name="sort" value={selectedSort} />
+
+                <button
+                  type="submit"
+                  className="w-full rounded-2xl bg-amber-400 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-amber-300 sm:w-auto"
+                >
+                  Import All Predictions V2
+                </button>
+              </form>
+            </div>
           </div>
 
           {params?.saved === "true" ? (
             <div className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-bold text-emerald-300">
               Predictions V2 snapshot saved successfully for{" "}
               {selectedLeague.name}.
+            </div>
+          ) : null}
+
+          {params?.importAll ? (
+            <div
+              className={`mt-4 rounded-2xl border p-4 ${
+                params.importAll === "success"
+                  ? "border-emerald-500/30 bg-emerald-500/10"
+                  : "border-amber-500/30 bg-amber-500/10"
+              }`}
+            >
+              <p
+                className={`text-sm font-black ${
+                  params.importAll === "success"
+                    ? "text-emerald-300"
+                    : "text-amber-300"
+                }`}
+              >
+                All-league Predictions V2 import {
+                  params.importAll === "success" ? "complete" : "partially completed"
+                }.
+              </p>
+
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                <SyncMetric
+                  label="Received"
+                  value={params.importReceived || "0"}
+                />
+                <SyncMetric
+                  label="Created"
+                  value={params.importCreated || "0"}
+                />
+                <SyncMetric
+                  label="Existing updated"
+                  value={params.importUpdated || "0"}
+                />
+                <SyncMetric
+                  label="Missing fixtureId"
+                  value={params.importMissingFixtureId || "0"}
+                />
+                <SyncMetric
+                  label="Failed"
+                  value={params.importFailed || "0"}
+                />
+              </div>
+
+              <p className="mt-3 text-xs font-bold leading-5 text-slate-400">
+                Existing settled rows keep their result fields. Only prediction
+                source fields are refreshed.
+              </p>
             </div>
           ) : null}
 
