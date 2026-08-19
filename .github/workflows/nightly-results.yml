@@ -2,9 +2,9 @@ name: Pro Football Intel Nightly Results
 
 on:
   schedule:
-    # Covers 23:37 Europe/London throughout GMT and BST.
-    # The Admin endpoint ignores the run outside the 23:00-23:59 London window.
-    - cron: "37 22 * * *"
+    # Run once nightly. The trusted GitHub Action forces the authenticated
+    # Admin endpoint to run, so execution is not dependent on a narrow
+    # Europe/London clock window.
     - cron: "37 23 * * *"
   workflow_dispatch:
 
@@ -26,12 +26,6 @@ jobs:
             exit 1
           fi
 
-          EXTRA_HEADER=()
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            EXTRA_HEADER=(-H "x-profbint-force: true")
-          fi
-
           HTTP_CODE=$(curl \
             --silent \
             --show-error \
@@ -43,7 +37,7 @@ jobs:
             --max-time 300 \
             -H "Authorization: Bearer ${NIGHTLY_RESULTS_SECRET}" \
             -H "Accept: application/json" \
-            "${EXTRA_HEADER[@]}" \
+            -H "x-profbint-force: true" \
             "https://admin.profbint.com/api/automation/nightly-results")
 
           echo "HTTP status: ${HTTP_CODE}"
