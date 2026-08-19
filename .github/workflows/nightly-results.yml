@@ -1,11 +1,6 @@
 name: Pro Football Intel Nightly Results
 
 on:
-  schedule:
-    # Run once nightly. The trusted GitHub Action forces the authenticated
-    # Admin endpoint to run, so execution is not dependent on a narrow
-    # Europe/London clock window.
-    - cron: "37 23 * * *"
   workflow_dispatch:
 
 jobs:
