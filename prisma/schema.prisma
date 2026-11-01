@@ -10,12 +10,12 @@ model PredictionHistory {
   id                  Int      @id @default(autoincrement())
 
   fixtureId           Int?
-leagueId            Int?
-leagueName          String?
-season              String   @default("2025/26")
+  leagueId            Int?
+  leagueName          String?
+  season              String   @default("2025/26")
 
-homeTeam            String
-awayTeam            String
+  homeTeam            String
+  awayTeam            String
 
   kickoff             DateTime?
 
@@ -40,4 +40,23 @@ awayTeam            String
   @@index([fixtureId])
   @@index([leagueId])
   @@index([status])
+}
+
+model StrongestPickHistory {
+  id           Int      @id @default(autoincrement())
+
+  fixtureId    Int      @unique
+  league       String
+  kickoff      DateTime
+  homeTeam     String
+  awayTeam     String
+
+  pick         String
+  selectedTeam String
+
+  qualifiedAt  DateTime @default(now())
+
+  @@index([kickoff])
+  @@index([pick])
+  @@index([qualifiedAt])
 }
