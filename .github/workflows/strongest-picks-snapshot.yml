@@ -1,0 +1,46 @@
+name: Strongest Picks Snapshot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9-20 * * *"
+
+jobs:
+  snapshot:
+    name: Capture Strongest Picks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Capture pre-match Strongest Picks
+        env:
+          STRONGEST_PICKS_SNAPSHOT_SECRET: ${{ secrets.STRONGEST_PICKS_SNAPSHOT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${STRONGEST_PICKS_SNAPSHOT_SECRET:-}" ]; then
+            echo "STRONGEST_PICKS_SNAPSHOT_SECRET is not configured in GitHub Actions."
+            exit 1
+          fi
+
+          HTTP_CODE=$(curl \
+            --silent \
+            --show-error \
+            --output response.json \
+            --write-out "%{http_code}" \
+            --request POST \
+            --retry 2 \
+            --retry-delay 5 \
+            --max-time 120 \
+            -H "Authorization: Bearer ${STRONGEST_PICKS_SNAPSHOT_SECRET}" \
+            -H "Accept: application/json" \
+            "https://admin.profbint.com/api/automation/strongest-picks-snapshot")
+
+          echo "HTTP status: ${HTTP_CODE}"
+          cat response.json
+          echo
+
+          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+            echo "Strongest Picks snapshot failed."
+            exit 1
+          fi
